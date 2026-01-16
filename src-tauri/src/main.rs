@@ -616,6 +616,7 @@ fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo,
     let addr = server.server_addr();
     let port = match addr {
         ListenAddr::IP(ip) => ip.port(),
+        #[cfg(unix)]
         ListenAddr::Unix(_) => 0,
     };
     *state.overlay_port.lock().unwrap() = Some(port);
