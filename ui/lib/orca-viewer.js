@@ -389,24 +389,26 @@ export function computeViewerState(report, config, profileIndex) {
       }
     }
 
-    // Analog stick values
+    // Analog stick values - these are the raw GCC output values
     const stickX = axes.stick_x ?? 0;
     const stickY = axes.stick_y ?? 0;
 
-    // Map analog inputs through profile mapping
-    // analogMapping[physicalInput] = outputId
-    // We need to show the value at the physical position with the remapped label
-    const analogValues = [
-      Math.max(0, -stickX),  // Physical 0: Stick Left
-      Math.max(0, stickX),   // Physical 1: Stick Right
-      Math.max(0, stickY),   // Physical 2: Stick Up
-      Math.max(0, -stickY),  // Physical 3: Stick Down
-      !digitalRPressed ? (axes.trigger_r ?? 0) : 0,  // Physical 4: Trigger R (hide when digital R pressed)
-    ];
+    // GCC analog outputs (what the game sees)
+    const gccAnalogOutputs = {
+      0: Math.max(0, -stickX),  // GCC output 0: Stick Left
+      1: Math.max(0, stickX),   // GCC output 1: Stick Right
+      2: Math.max(0, stickY),   // GCC output 2: Stick Up
+      3: Math.max(0, -stickY),  // GCC output 3: Stick Down
+      4: !digitalRPressed ? (axes.trigger_r ?? 0) : 0,  // GCC output 4: Trigger R
+    };
 
-    // Apply analog values to their physical positions
-    for (let i = 0; i < analogValues.length; i++) {
-      analogValueBySrc[i] = analogValues[i];
+    // Apply values to positions based on what output each position is mapped to
+    // This way, the position labeled "v" lights up when down output is active
+    for (let pos = 0; pos < analogMapping.length; pos++) {
+      const outputId = analogMapping[pos];
+      if (outputId !== ORCA_ANALOG_DISABLED && outputId in gccAnalogOutputs) {
+        analogValueBySrc[pos] = gccAnalogOutputs[outputId];
+      }
     }
   }
 
