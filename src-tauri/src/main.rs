@@ -789,6 +789,10 @@ fn set_overlay_always_on_top(app: AppHandle, enabled: bool) -> Result<(), String
     Ok(())
 }
 
+// Fixed ports for OBS overlay - consistent across runs so users don't need to update OBS settings
+const OVERLAY_HTTP_PORT: u16 = 4725;
+const OVERLAY_WS_PORT: u16 = 4726;
+
 #[tauri::command]
 fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo, String> {
     if state.overlay_running.swap(true, Ordering::SeqCst) {
@@ -803,14 +807,13 @@ fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo,
     let running = state.overlay_running.clone();
     let shared = state.shared.clone();
 
-    // Start HTTP server
-    let server = match Server::http("127.0.0.1:0") {
-        Ok(server) => server,
-        Err(e) => {
+    // Start HTTP server - try fixed port first, fall back to random
+    let server = Server::http(format!("127.0.0.1:{OVERLAY_HTTP_PORT}"))
+        .or_else(|_| Server::http("127.0.0.1:0"))
+        .map_err(|e| {
             state.overlay_running.store(false, Ordering::SeqCst);
-            return Err(format!("Server start failed: {e}"));
-        }
-    };
+            format!("Server start failed: {e}")
+        })?;
     let addr = server.server_addr();
     let port = match addr {
         ListenAddr::IP(ip) => ip.port(),
@@ -819,14 +822,13 @@ fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo,
     };
     *state.overlay_port.lock().unwrap() = Some(port);
 
-    // Start WebSocket server
-    let ws_listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(e) => {
+    // Start WebSocket server - try fixed port first, fall back to random
+    let ws_listener = TcpListener::bind(format!("127.0.0.1:{OVERLAY_WS_PORT}"))
+        .or_else(|_| TcpListener::bind("127.0.0.1:0"))
+        .map_err(|e| {
             state.overlay_running.store(false, Ordering::SeqCst);
-            return Err(format!("WebSocket server start failed: {e}"));
-        }
-    };
+            format!("WebSocket server start failed: {e}")
+        })?;
     let ws_port = ws_listener.local_addr().map(|a| a.port()).unwrap_or(0);
     *state.overlay_ws_port.lock().unwrap() = Some(ws_port);
 

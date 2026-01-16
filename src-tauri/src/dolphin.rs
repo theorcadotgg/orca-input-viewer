@@ -59,24 +59,35 @@ mod windows {
         HANDLE, MEMORY_BASIC_INFORMATION, MEM_MAPPED, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
 
-    /// Memory addresses for Melee controller data (PADStatus structs)
+    /// Memory addresses for Melee controller data
     /// NTSC 1.02: 0x804C1FAC
-    const MELEE_PAD_STATUS_BASE: u32 = 0x804C1FAC;
-    const PAD_STATUS_SIZE: u32 = 0x0C; // 12 bytes per controller
+    /// This is Melee's controller struct, not raw PADStatus
+    const MELEE_CONTROLLER_BASE: u32 = 0x804C1FAC;
+    const CONTROLLER_STRUCT_SIZE: u32 = 0x44; // 68 bytes per controller
 
-    /// GameCube PADStatus button bit flags (big-endian u16)
-    const PAD_BUTTON_LEFT: u16 = 0x0001;
-    const PAD_BUTTON_RIGHT: u16 = 0x0002;
-    const PAD_BUTTON_DOWN: u16 = 0x0004;
-    const PAD_BUTTON_UP: u16 = 0x0008;
-    const PAD_BUTTON_Z: u16 = 0x0010;
-    const PAD_BUTTON_R: u16 = 0x0020;
-    const PAD_BUTTON_L: u16 = 0x0040;
-    const PAD_BUTTON_A: u16 = 0x0100;
-    const PAD_BUTTON_B: u16 = 0x0200;
-    const PAD_BUTTON_X: u16 = 0x0400;
-    const PAD_BUTTON_Y: u16 = 0x0800;
-    const PAD_BUTTON_START: u16 = 0x1000;
+    /// Offsets within the Melee controller struct
+    const OFFSET_BUTTONS: usize = 0x00;      // u32 buttons pressed
+    const OFFSET_TRIGGER_L: usize = 0x1C;    // u8 L trigger analog
+    const OFFSET_TRIGGER_R: usize = 0x1D;    // u8 R trigger analog
+    const OFFSET_STICK_X: usize = 0x20;      // f32 main stick X
+    const OFFSET_STICK_Y: usize = 0x24;      // f32 main stick Y
+    const OFFSET_CSTICK_X: usize = 0x28;     // f32 C-stick X
+    const OFFSET_CSTICK_Y: usize = 0x2C;     // f32 C-stick Y
+    const OFFSET_PLUGGED: usize = 0x41;      // u8 plugged status
+
+    /// GameCube button bit flags (u32, but only lower 16 bits used)
+    const PAD_BUTTON_LEFT: u32 = 0x0001;
+    const PAD_BUTTON_RIGHT: u32 = 0x0002;
+    const PAD_BUTTON_DOWN: u32 = 0x0004;
+    const PAD_BUTTON_UP: u32 = 0x0008;
+    const PAD_BUTTON_Z: u32 = 0x0010;
+    const PAD_BUTTON_R: u32 = 0x0020;
+    const PAD_BUTTON_L: u32 = 0x0040;
+    const PAD_BUTTON_A: u32 = 0x0100;
+    const PAD_BUTTON_B: u32 = 0x0200;
+    const PAD_BUTTON_X: u32 = 0x0400;
+    const PAD_BUTTON_Y: u32 = 0x0800;
+    const PAD_BUTTON_START: u32 = 0x1000;
 
     fn default_buttons() -> Buttons {
         Buttons {
@@ -141,12 +152,12 @@ mod windows {
             let mut ports = Vec::with_capacity(4);
 
             for port in 0..4u8 {
-                let pad_addr = MELEE_PAD_STATUS_BASE + (port as u32 * PAD_STATUS_SIZE);
+                let controller_addr = MELEE_CONTROLLER_BASE + (port as u32 * CONTROLLER_STRUCT_SIZE);
                 // Mask off high bits to get offset within GC RAM (0x80000000 -> 0x00000000)
-                let host_addr = self.gc_ram_base + (pad_addr & 0x01FFFFFF) as usize;
+                let host_addr = self.gc_ram_base + (controller_addr & 0x01FFFFFF) as usize;
 
-                // Read PADStatus struct (12 bytes)
-                let mut buf = [0u8; 12];
+                // Read the full controller struct (68 bytes)
+                let mut buf = [0u8; 0x44];
                 if !self.read_memory(host_addr, &mut buf) {
                     ports.push(PortReport {
                         port,
@@ -157,36 +168,49 @@ mod windows {
                     continue;
                 }
 
-                // Parse button state (offset 0x00, big-endian u16)
-                let buttons_raw = u16::from_be_bytes([buf[0], buf[1]]);
+                // Parse button state (offset 0x00, big-endian u32)
+                let buttons_raw = u32::from_be_bytes([
+                    buf[OFFSET_BUTTONS],
+                    buf[OFFSET_BUTTONS + 1],
+                    buf[OFFSET_BUTTONS + 2],
+                    buf[OFFSET_BUTTONS + 3],
+                ]);
 
-                // Parse analog values - these are signed bytes (-128 to 127, 0 = center)
-                let stick_x_raw = buf[2] as i8;
-                let stick_y_raw = buf[3] as i8;
-                let substick_x_raw = buf[4] as i8;
-                let substick_y_raw = buf[5] as i8;
-                let trigger_l = buf[6];
-                let trigger_r = buf[7];
+                // Parse trigger values (bytes at specific offsets)
+                let trigger_l = buf[OFFSET_TRIGGER_L];
+                let trigger_r = buf[OFFSET_TRIGGER_R];
 
-                // Convert to normalized floats (-1.0 to 1.0)
-                let stick_x = stick_x_raw as f32 / 128.0;
-                let stick_y = stick_y_raw as f32 / 128.0;
-                let substick_x = substick_x_raw as f32 / 128.0;
-                let substick_y = substick_y_raw as f32 / 128.0;
+                // Parse stick values as big-endian floats
+                let stick_x = f32::from_be_bytes([
+                    buf[OFFSET_STICK_X],
+                    buf[OFFSET_STICK_X + 1],
+                    buf[OFFSET_STICK_X + 2],
+                    buf[OFFSET_STICK_X + 3],
+                ]);
+                let stick_y = f32::from_be_bytes([
+                    buf[OFFSET_STICK_Y],
+                    buf[OFFSET_STICK_Y + 1],
+                    buf[OFFSET_STICK_Y + 2],
+                    buf[OFFSET_STICK_Y + 3],
+                ]);
+                let substick_x = f32::from_be_bytes([
+                    buf[OFFSET_CSTICK_X],
+                    buf[OFFSET_CSTICK_X + 1],
+                    buf[OFFSET_CSTICK_X + 2],
+                    buf[OFFSET_CSTICK_X + 3],
+                ]);
+                let substick_y = f32::from_be_bytes([
+                    buf[OFFSET_CSTICK_Y],
+                    buf[OFFSET_CSTICK_Y + 1],
+                    buf[OFFSET_CSTICK_Y + 2],
+                    buf[OFFSET_CSTICK_Y + 3],
+                ]);
 
-                // In Dolphin mode, if we can read memory, port 0 is always connected
-                // Other ports we mark as connected only if they show activity
-                let connected = if port == 0 {
-                    true // Port 0 is always connected when reading from Dolphin
-                } else {
-                    buttons_raw != 0
-                        || trigger_l > 0
-                        || trigger_r > 0
-                        || stick_x_raw != 0
-                        || stick_y_raw != 0
-                        || substick_x_raw != 0
-                        || substick_y_raw != 0
-                };
+                // Check plugged status
+                let plugged = buf[OFFSET_PLUGGED];
+
+                // Port is connected if plugged byte is non-zero, or for port 0 always show connected
+                let connected = port == 0 || plugged != 0;
 
                 let buttons = Buttons {
                     a: (buttons_raw & PAD_BUTTON_A) != 0,
@@ -290,24 +314,35 @@ mod macos {
     use mach2::vm_types::{mach_vm_address_t, mach_vm_size_t};
     use std::mem;
 
-    /// Memory addresses for Melee controller data (PADStatus structs)
+    /// Memory addresses for Melee controller data
     /// NTSC 1.02: 0x804C1FAC
-    const MELEE_PAD_STATUS_BASE: u32 = 0x804C1FAC;
-    const PAD_STATUS_SIZE: u32 = 0x0C; // 12 bytes per controller
+    /// This is Melee's controller struct, not raw PADStatus
+    const MELEE_CONTROLLER_BASE: u32 = 0x804C1FAC;
+    const CONTROLLER_STRUCT_SIZE: u32 = 0x44; // 68 bytes per controller
 
-    /// GameCube PADStatus button bit flags (big-endian u16)
-    const PAD_BUTTON_LEFT: u16 = 0x0001;
-    const PAD_BUTTON_RIGHT: u16 = 0x0002;
-    const PAD_BUTTON_DOWN: u16 = 0x0004;
-    const PAD_BUTTON_UP: u16 = 0x0008;
-    const PAD_BUTTON_Z: u16 = 0x0010;
-    const PAD_BUTTON_R: u16 = 0x0020;
-    const PAD_BUTTON_L: u16 = 0x0040;
-    const PAD_BUTTON_A: u16 = 0x0100;
-    const PAD_BUTTON_B: u16 = 0x0200;
-    const PAD_BUTTON_X: u16 = 0x0400;
-    const PAD_BUTTON_Y: u16 = 0x0800;
-    const PAD_BUTTON_START: u16 = 0x1000;
+    /// Offsets within the Melee controller struct
+    const OFFSET_BUTTONS: usize = 0x00;      // u32 buttons pressed
+    const OFFSET_TRIGGER_L: usize = 0x1C;    // u8 L trigger analog
+    const OFFSET_TRIGGER_R: usize = 0x1D;    // u8 R trigger analog
+    const OFFSET_STICK_X: usize = 0x20;      // f32 main stick X
+    const OFFSET_STICK_Y: usize = 0x24;      // f32 main stick Y
+    const OFFSET_CSTICK_X: usize = 0x28;     // f32 C-stick X
+    const OFFSET_CSTICK_Y: usize = 0x2C;     // f32 C-stick Y
+    const OFFSET_PLUGGED: usize = 0x41;      // u8 plugged status
+
+    /// GameCube button bit flags (u32, but only lower 16 bits used)
+    const PAD_BUTTON_LEFT: u32 = 0x0001;
+    const PAD_BUTTON_RIGHT: u32 = 0x0002;
+    const PAD_BUTTON_DOWN: u32 = 0x0004;
+    const PAD_BUTTON_UP: u32 = 0x0008;
+    const PAD_BUTTON_Z: u32 = 0x0010;
+    const PAD_BUTTON_R: u32 = 0x0020;
+    const PAD_BUTTON_L: u32 = 0x0040;
+    const PAD_BUTTON_A: u32 = 0x0100;
+    const PAD_BUTTON_B: u32 = 0x0200;
+    const PAD_BUTTON_X: u32 = 0x0400;
+    const PAD_BUTTON_Y: u32 = 0x0800;
+    const PAD_BUTTON_START: u32 = 0x1000;
 
     fn default_buttons() -> Buttons {
         Buttons {
@@ -377,14 +412,13 @@ mod macos {
             let mut ports = Vec::with_capacity(4);
 
             for port in 0..4u8 {
-                let pad_addr = MELEE_PAD_STATUS_BASE + (port as u32 * PAD_STATUS_SIZE);
+                let controller_addr = MELEE_CONTROLLER_BASE + (port as u32 * CONTROLLER_STRUCT_SIZE);
                 // Mask off high bits to get offset within GC RAM (0x80000000 -> 0x00000000)
-                let offset = (pad_addr & 0x01FFFFFF) as u64;
+                let offset = (controller_addr & 0x01FFFFFF) as u64;
                 let host_addr = self.gc_ram_base + offset;
 
-                // Read PADStatus struct (12 bytes)
-                // Layout: u16 buttons, i8 stickX, i8 stickY, i8 substickX, i8 substickY, u8 triggerL, u8 triggerR, u8 analogA, u8 analogB, i8 err, u8 padding
-                let mut buf = [0u8; 12];
+                // Read the full controller struct (68 bytes)
+                let mut buf = [0u8; 0x44];
                 if !self.read_memory(host_addr, &mut buf) {
                     ports.push(PortReport {
                         port,
@@ -395,36 +429,49 @@ mod macos {
                     continue;
                 }
 
-                // Parse button state (offset 0x00, big-endian u16)
-                let buttons_raw = u16::from_be_bytes([buf[0], buf[1]]);
+                // Parse button state (offset 0x00, big-endian u32)
+                let buttons_raw = u32::from_be_bytes([
+                    buf[OFFSET_BUTTONS],
+                    buf[OFFSET_BUTTONS + 1],
+                    buf[OFFSET_BUTTONS + 2],
+                    buf[OFFSET_BUTTONS + 3],
+                ]);
 
-                // Parse analog values - these are signed bytes (-128 to 127, 0 = center)
-                let stick_x_raw = buf[2] as i8;
-                let stick_y_raw = buf[3] as i8;
-                let substick_x_raw = buf[4] as i8;
-                let substick_y_raw = buf[5] as i8;
-                let trigger_l = buf[6];
-                let trigger_r = buf[7];
+                // Parse trigger values (bytes at specific offsets)
+                let trigger_l = buf[OFFSET_TRIGGER_L];
+                let trigger_r = buf[OFFSET_TRIGGER_R];
 
-                // Convert to normalized floats (-1.0 to 1.0)
-                let stick_x = stick_x_raw as f32 / 128.0;
-                let stick_y = stick_y_raw as f32 / 128.0;
-                let substick_x = substick_x_raw as f32 / 128.0;
-                let substick_y = substick_y_raw as f32 / 128.0;
+                // Parse stick values as big-endian floats
+                let stick_x = f32::from_be_bytes([
+                    buf[OFFSET_STICK_X],
+                    buf[OFFSET_STICK_X + 1],
+                    buf[OFFSET_STICK_X + 2],
+                    buf[OFFSET_STICK_X + 3],
+                ]);
+                let stick_y = f32::from_be_bytes([
+                    buf[OFFSET_STICK_Y],
+                    buf[OFFSET_STICK_Y + 1],
+                    buf[OFFSET_STICK_Y + 2],
+                    buf[OFFSET_STICK_Y + 3],
+                ]);
+                let substick_x = f32::from_be_bytes([
+                    buf[OFFSET_CSTICK_X],
+                    buf[OFFSET_CSTICK_X + 1],
+                    buf[OFFSET_CSTICK_X + 2],
+                    buf[OFFSET_CSTICK_X + 3],
+                ]);
+                let substick_y = f32::from_be_bytes([
+                    buf[OFFSET_CSTICK_Y],
+                    buf[OFFSET_CSTICK_Y + 1],
+                    buf[OFFSET_CSTICK_Y + 2],
+                    buf[OFFSET_CSTICK_Y + 3],
+                ]);
 
-                // In Dolphin mode, if we can read memory, port 0 is always connected
-                // Other ports we mark as connected only if they show activity
-                let connected = if port == 0 {
-                    true // Port 0 is always connected when reading from Dolphin
-                } else {
-                    buttons_raw != 0
-                        || trigger_l > 0
-                        || trigger_r > 0
-                        || stick_x_raw != 0
-                        || stick_y_raw != 0
-                        || substick_x_raw != 0
-                        || substick_y_raw != 0
-                };
+                // Check plugged status
+                let plugged = buf[OFFSET_PLUGGED];
+
+                // Port is connected if plugged byte is non-zero, or for port 0 always show connected
+                let connected = port == 0 || plugged != 0;
 
                 let buttons = Buttons {
                     a: (buttons_raw & PAD_BUTTON_A) != 0,
