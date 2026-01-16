@@ -77,6 +77,7 @@ struct InputReport {
 struct SharedState {
     last_report: Mutex<Option<InputReport>>,
     config_blob_b64: Mutex<Option<String>>,
+    selected_profile: Mutex<u8>,
 }
 
 #[derive(Default)]
@@ -598,6 +599,24 @@ fn get_config_blob(state: State<'_, AppState>) -> Result<Option<String>, String>
 }
 
 #[tauri::command]
+fn set_selected_profile(state: State<'_, AppState>, profile: u8) -> Result<(), String> {
+    if let Ok(mut guard) = state.shared.selected_profile.lock() {
+        *guard = profile;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_selected_profile(state: State<'_, AppState>) -> Result<u8, String> {
+    let guard = state
+        .shared
+        .selected_profile
+        .lock()
+        .map_err(|_| "Profile lock failed".to_string())?;
+    Ok(*guard)
+}
+
+#[tauri::command]
 fn show_overlay_window(app: AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("overlay")
@@ -673,7 +692,8 @@ fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo,
                         "/state" => {
                             let report = shared.last_report.lock().ok().and_then(|g| g.clone());
                             let blob = shared.config_blob_b64.lock().ok().and_then(|g| g.clone());
-                            let body = serde_json::json!({ "input": report, "blobBase64": blob });
+                            let profile = shared.selected_profile.lock().ok().map(|g| *g).unwrap_or(0);
+                            let body = serde_json::json!({ "input": report, "blobBase64": blob, "profile": profile });
                             Response::from_string(body.to_string())
                                 .with_header(content_type("application/json"))
                         }
@@ -730,6 +750,8 @@ fn main() {
             load_config,
             set_config_blob,
             get_config_blob,
+            set_selected_profile,
+            get_selected_profile,
             show_overlay_window,
             hide_overlay_window,
             start_overlay_server,

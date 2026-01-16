@@ -345,20 +345,25 @@ export function computeViewerState(report, config, profileIndex) {
     if (buttons.b) { digitalActiveBySrc[1] = true; digitalValueBySrc[1] = 1; }
     if (buttons.x) { digitalActiveBySrc[2] = true; digitalValueBySrc[2] = 1; }
     if (buttons.y) { digitalActiveBySrc[3] = true; digitalValueBySrc[3] = 1; }
-    if (buttons.z) { digitalActiveBySrc[4] = true; digitalValueBySrc[4] = 1; }
     if (buttons.start) { digitalActiveBySrc[13] = true; digitalValueBySrc[13] = 1; }
 
-    // L/R buttons - Orca sends these as analog trigger values, not digital bits
-    // Check both digital bit AND analog trigger threshold
+    // Orca-specific mappings: Z, L, R are sent through D-pad signals
+    // Z is sent as dpad_right
+    if (buttons.z || buttons.dpad_right) {
+      digitalActiveBySrc[4] = true;  // Z
+      digitalValueBySrc[4] = 1;
+    }
+
+    // L/R digital presses are sent as dpad_up/dpad_down
+    // Analog triggers are used for lightshield detection
     const triggerL = axes.trigger_l ?? 0;
     const triggerR = axes.trigger_r ?? 0;
 
-    // Full press threshold for digital L/R
-    const fullPressThreshold = 0.85;
-    // Lightshield threshold (partial press)
+    // Lightshield threshold (partial press below full digital)
     const lightshieldThreshold = 0.15;
 
-    if (buttons.l || triggerL >= fullPressThreshold) {
+    // L is sent as dpad_up for digital press
+    if (buttons.l || buttons.dpad_up) {
       digitalActiveBySrc[5] = true;  // L
       digitalValueBySrc[5] = 1;
     } else if (triggerL >= lightshieldThreshold) {
@@ -366,7 +371,8 @@ export function computeViewerState(report, config, profileIndex) {
       digitalValueBySrc[12] = 1;
     }
 
-    if (buttons.r || triggerR >= fullPressThreshold) {
+    // R is sent as dpad_down for digital press
+    if (buttons.r || buttons.dpad_down) {
       digitalActiveBySrc[6] = true;  // R
       digitalValueBySrc[6] = 1;
     }

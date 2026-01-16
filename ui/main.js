@@ -51,6 +51,14 @@ function tauriListen(event, handler) {
   return tauri.listen ? tauri.listen(event, handler) : Promise.resolve(() => {});
 }
 
+function tauriEmit(event, payload) {
+  const tauri = window.__TAURI__;
+  if (!tauri) return Promise.resolve();
+  if (tauri.event?.emit) return tauri.event.emit(event, payload);
+  if (tauri.emit) return tauri.emit(event, payload);
+  return Promise.resolve();
+}
+
 // UI Update Functions
 function updateProfileOptions() {
   profileSelect.innerHTML = '';
@@ -141,6 +149,9 @@ portSelect.addEventListener('change', (e) => {
 profileSelect.addEventListener('change', (e) => {
   selectedProfile = Number(e.target.value);
   render();
+  // Sync profile to backend (for OBS overlay) and notify overlay window
+  tauriInvoke('set_selected_profile', { profile: selectedProfile }).catch(() => {});
+  tauriEmit('profile_changed', { profile: selectedProfile });
 });
 
 startStream.addEventListener('click', async () => {
@@ -183,13 +194,17 @@ loadConfigBtn.addEventListener('click', async () => {
 
   try {
     const res = await tauriInvoke('load_config');
-    config = decodeConfig(res.blob_base64 || res.blobBase64);
+    const blobBase64 = res.blob_base64 || res.blobBase64;
+    config = decodeConfig(blobBase64);
     setConfigStatus(true);
     loadHint.textContent = 'Config loaded. Device rebooted to normal mode.';
     loadHint.style.color = 'var(--success)';
     selectedProfile = config.activeProfile ?? 0;
     updateProfileOptions();
     render();
+    // Sync profile to backend and notify overlay of config change
+    tauriInvoke('set_selected_profile', { profile: selectedProfile }).catch(() => {});
+    tauriEmit('config_changed', { blobBase64, profile: selectedProfile });
   } catch (err) {
     console.error('Config load failed:', err);
     setConfigStatus(false);

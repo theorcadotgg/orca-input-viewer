@@ -47,6 +47,11 @@ async function pollState() {
     const data = await res.json();
     if (data.blobBase64) {
       config = decodeConfig(data.blobBase64);
+    }
+    // Use profile from backend if available, otherwise fall back to config's active profile
+    if (typeof data.profile === 'number') {
+      selectedProfile = data.profile;
+    } else {
       selectedProfile = config.activeProfile ?? 0;
     }
     render(data.input?.ports ? data.input.ports[0] : data.input);
@@ -61,6 +66,27 @@ async function bootstrap() {
   if (window.__TAURI__) {
     await loadConfigFromBackend();
     await tauriListen('input_report', (event) => render(event.payload));
+
+    // Listen for config changes from main window
+    await tauriListen('config_changed', (event) => {
+      const { blobBase64, profile } = event.payload;
+      if (blobBase64) {
+        config = decodeConfig(blobBase64);
+      }
+      if (typeof profile === 'number') {
+        selectedProfile = profile;
+      }
+      render(null);
+    });
+
+    // Listen for profile selection changes from main window
+    await tauriListen('profile_changed', (event) => {
+      const { profile } = event.payload;
+      if (typeof profile === 'number') {
+        selectedProfile = profile;
+        render(null);
+      }
+    });
   } else {
     pollState();
   }
