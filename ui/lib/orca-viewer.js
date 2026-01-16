@@ -319,66 +319,68 @@ export function buildDiagram(svg) {
 
 export function computeViewerState(report, config, profileIndex) {
   const profile = Math.min(profileIndex ?? config.activeProfile ?? 0, 7);
-  const digitalMapping = config.digitalMappings[profile] ?? defaultDigitalMapping();
-  const analogMapping = config.analogMappings[profile] ?? defaultAnalogMapping();
   const triggerPolicy = config.triggerPolicy[profile] ?? defaultTriggerPolicy();
 
-  const digitalDestBySrc = Array.from({ length: 17 }, () => ORCA_DUMMY_FIELD);
-  digitalMapping.forEach((src, dest) => {
-    if (src >= 0 && src < digitalDestBySrc.length) {
-      digitalDestBySrc[src] = dest;
-    }
-  });
-
-  const analogDestBySrc = Array.from({ length: 5 }, () => ORCA_ANALOG_DISABLED);
-  analogMapping.forEach((src, dest) => {
-    if (src >= 0 && src < analogDestBySrc.length) {
-      analogDestBySrc[src] = dest;
-    }
-  });
-
-  const orcaDigitalActive = new Set();
-  if (report) {
-    ADAPTER_BUTTON_ORDER.forEach((key, idx) => {
-      const pressed = report.buttons?.[key];
-      if (!pressed) return;
-      const intermediate = INTERMEDIATE_USB_ADAPTER_DIGITAL_MAPPING[idx];
-      const orcaDest = ORCA_INTERMEDIATE_DIGITAL_MAPPING[intermediate] ?? ORCA_DUMMY_FIELD;
-      if (orcaDest !== ORCA_DUMMY_FIELD) {
-        orcaDigitalActive.add(orcaDest);
-      }
-    });
-  }
-
-  const outputAnalog = [0, 0, 0, 0, 0];
-  if (report) {
-    const stickX = report.axes?.stick_x ?? 0;
-    const stickY = report.axes?.stick_y ?? 0;
-    outputAnalog[0] = Math.max(0, -stickX);
-    outputAnalog[1] = Math.max(0, stickX);
-    outputAnalog[2] = Math.max(0, stickY);
-    outputAnalog[3] = Math.max(0, -stickY);
-    outputAnalog[4] = report.axes?.trigger_r ?? 0;
-  }
-
+  // Digital button states (indexed by DIGITAL_INPUTS id)
+  // 0=A, 1=B, 2=X, 3=Y, 4=Z, 5=L, 6=R, 7=C<, 8=C>, 9=C^, 10=Cv, 11=D, 12=LS, 13=St
   const digitalActiveBySrc = Array.from({ length: 17 }, () => false);
   const digitalValueBySrc = Array.from({ length: 17 }, () => 0);
-  orcaDigitalActive.forEach((dest) => {
-    const src = digitalMapping[dest];
-    if (src === undefined || src === ORCA_DUMMY_FIELD) return;
-    digitalActiveBySrc[src] = true;
-    digitalValueBySrc[src] = 1;
-  });
 
+  // Analog values (indexed by ANALOG_INPUTS id)
+  // 0=Stick Left, 1=Stick Right, 2=Stick Up, 3=Stick Down, 4=Trigger R
   const analogValueBySrc = Array.from({ length: 5 }, () => 0);
-  outputAnalog.forEach((value, dest) => {
-    const src = analogMapping[dest] ?? dest;
-    if (src === ORCA_ANALOG_DISABLED) return;
-    analogValueBySrc[src] = Math.max(analogValueBySrc[src], value);
-  });
 
-  const digitalLabelBySrc = digitalDestBySrc.map((dest) => digitalLabel(dest));
-  const analogLabelBySrc = analogDestBySrc.map((dest) => analogLabel(dest));
+  if (report) {
+    const buttons = report.buttons ?? {};
+    const axes = report.axes ?? {};
+
+    // Direct button mapping from adapter
+    if (buttons.a) { digitalActiveBySrc[0] = true; digitalValueBySrc[0] = 1; }
+    if (buttons.b) { digitalActiveBySrc[1] = true; digitalValueBySrc[1] = 1; }
+    if (buttons.x) { digitalActiveBySrc[2] = true; digitalValueBySrc[2] = 1; }
+    if (buttons.y) { digitalActiveBySrc[3] = true; digitalValueBySrc[3] = 1; }
+    if (buttons.z) { digitalActiveBySrc[4] = true; digitalValueBySrc[4] = 1; }
+    if (buttons.l) { digitalActiveBySrc[5] = true; digitalValueBySrc[5] = 1; }
+    if (buttons.r) { digitalActiveBySrc[6] = true; digitalValueBySrc[6] = 1; }
+    if (buttons.start) { digitalActiveBySrc[13] = true; digitalValueBySrc[13] = 1; }
+
+    // D-pad - show as single "D" button if any direction pressed
+    if (buttons.dpad_up || buttons.dpad_down || buttons.dpad_left || buttons.dpad_right) {
+      digitalActiveBySrc[11] = true;
+      digitalValueBySrc[11] = 1;
+    }
+
+    // C-stick as digital buttons (threshold at 0.5)
+    const cstickThreshold = 0.5;
+    const substickX = axes.substick_x ?? 0;
+    const substickY = axes.substick_y ?? 0;
+    if (substickX < -cstickThreshold) { digitalActiveBySrc[7] = true; digitalValueBySrc[7] = 1; }  // C Left
+    if (substickX > cstickThreshold) { digitalActiveBySrc[8] = true; digitalValueBySrc[8] = 1; }   // C Right
+    if (substickY > cstickThreshold) { digitalActiveBySrc[9] = true; digitalValueBySrc[9] = 1; }   // C Up
+    if (substickY < -cstickThreshold) { digitalActiveBySrc[10] = true; digitalValueBySrc[10] = 1; } // C Down
+
+    // Lightshield - show when L trigger is partially pressed but L button not fully pressed
+    const triggerL = axes.trigger_l ?? 0;
+    if (triggerL > 0.1 && !buttons.l) {
+      digitalActiveBySrc[12] = true;
+      digitalValueBySrc[12] = 1;
+    }
+
+    // Main stick as analog values
+    const stickX = axes.stick_x ?? 0;
+    const stickY = axes.stick_y ?? 0;
+    analogValueBySrc[0] = Math.max(0, -stickX);  // Left
+    analogValueBySrc[1] = Math.max(0, stickX);   // Right
+    analogValueBySrc[2] = Math.max(0, stickY);   // Up
+    analogValueBySrc[3] = Math.max(0, -stickY);  // Down
+
+    // Right trigger analog
+    analogValueBySrc[4] = axes.trigger_r ?? 0;
+  }
+
+  // Labels for display
+  const digitalLabelBySrc = DIGITAL_INPUTS.map(d => d.shortLabel);
+  const analogLabelBySrc = ANALOG_INPUTS.map(a => a.shortLabel);
 
   return {
     digitalActiveBySrc,
