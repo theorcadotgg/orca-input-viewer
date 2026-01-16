@@ -195,7 +195,11 @@ fn read_frame(port: &mut dyn serialport::SerialPort, timeout: Duration) -> Resul
 
     loop {
         if start.elapsed() > timeout {
-            return Err("Timeout waiting for response".to_string());
+            if rx.is_empty() {
+                return Err("Timeout: No response from device. Ensure Orca is in config mode (press and hold config button while connecting).".to_string());
+            } else {
+                return Err(format!("Timeout: Partial response ({} bytes received, possibly corrupt data)", rx.len()));
+            }
         }
 
         match port.read(&mut buf) {
@@ -215,8 +219,16 @@ fn read_frame(port: &mut dyn serialport::SerialPort, timeout: Duration) -> Resul
 fn send_and_read(port: &mut dyn serialport::SerialPort, seq: &mut u32, payload: &[u8]) -> Result<OrcaFrame, String> {
     let frame = encode_frame(ORCA_MSG_REQUEST, *seq, payload);
     *seq = seq.wrapping_add(1);
+
+    // Flush any pending input data before writing
+    let _ = port.clear(serialport::ClearBuffer::Input);
+
     port.write_all(&frame).map_err(|e| format!("Serial write error: {e}"))?;
-    read_frame(port, Duration::from_millis(1500))
+
+    // Ensure data is flushed to the device
+    port.flush().map_err(|e| format!("Serial flush error: {e}"))?;
+
+    read_frame(port, Duration::from_millis(2000))
 }
 
 fn read_device_info(frame: &OrcaFrame) -> Result<DeviceInfo, String> {
@@ -534,9 +546,18 @@ fn stop_adapter_stream(state: State<'_, AppState>) -> Result<(), String> {
 fn load_config(state: State<'_, AppState>) -> Result<LoadConfigResult, String> {
     let port_info = wait_for_config_port(Duration::from_secs(12))?;
     let mut port = serialport::new(&port_info.port_name, CONFIG_BAUD)
-        .timeout(Duration::from_millis(120))
+        .timeout(Duration::from_millis(200))
         .open()
         .map_err(|e| format!("Open config port failed: {e}"))?;
+
+    // Set DTR (Data Terminal Ready) which some devices require
+    let _ = port.write_data_terminal_ready(true);
+
+    // Give the device a moment to initialize after connection
+    thread::sleep(Duration::from_millis(100));
+
+    // Clear any stale data in buffers
+    let _ = port.clear(serialport::ClearBuffer::All);
 
     let mut seq = 1u32;
     let frame = send_and_read(&mut *port, &mut seq, &[ORCA_CMD_GET_INFO])?;

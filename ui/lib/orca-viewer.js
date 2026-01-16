@@ -334,6 +334,12 @@ export function computeViewerState(report, config, profileIndex) {
     const buttons = report.buttons ?? {};
     const axes = report.axes ?? {};
 
+    // Debug: log any button press
+    const pressedButtons = Object.entries(buttons).filter(([k, v]) => v === true).map(([k]) => k);
+    if (pressedButtons.length > 0) {
+      console.log('Pressed buttons:', pressedButtons, 'Axes:', axes);
+    }
+
     // Direct button mapping from adapter
     if (buttons.a) { digitalActiveBySrc[0] = true; digitalValueBySrc[0] = 1; }
     if (buttons.b) { digitalActiveBySrc[1] = true; digitalValueBySrc[1] = 1; }
