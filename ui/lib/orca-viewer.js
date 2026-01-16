@@ -380,12 +380,14 @@ export function computeViewerState(report, config, profileIndex) {
     if (substickY > cstickThreshold) activeGccOutputs.add(9);    // C Up
     if (substickY < -cstickThreshold) activeGccOutputs.add(10);  // C Down
 
-    // Light up based on received GCC output directly
-    // The mapping is for display labels, not signal routing
+    // Reverse map: for each active GCC output, find which physical button positions
+    // are mapped to produce that output, and light those up
     for (const outputId of activeGccOutputs) {
-      if (outputId < digitalActiveBySrc.length) {
-        digitalActiveBySrc[outputId] = true;
-        digitalValueBySrc[outputId] = 1;
+      for (let physicalPos = 0; physicalPos < digitalMapping.length; physicalPos++) {
+        if (digitalMapping[physicalPos] === outputId) {
+          digitalActiveBySrc[physicalPos] = true;
+          digitalValueBySrc[physicalPos] = 1;
+        }
       }
     }
 
@@ -402,12 +404,16 @@ export function computeViewerState(report, config, profileIndex) {
       4: !digitalRPressed ? (axes.trigger_r ?? 0) : 0,  // GCC output 4: Trigger R
     };
 
-    // Apply values to positions based on what output each position is mapped to
-    // This way, the position labeled "v" lights up when down output is active
-    for (let pos = 0; pos < analogMapping.length; pos++) {
-      const outputId = analogMapping[pos];
-      if (outputId !== ORCA_ANALOG_DISABLED && outputId in gccAnalogOutputs) {
-        analogValueBySrc[pos] = gccAnalogOutputs[outputId];
+    // Reverse map analog: for each GCC analog output, find which physical positions
+    // are mapped to produce that output, and apply the value to those positions
+    for (const [outputIdStr, outputValue] of Object.entries(gccAnalogOutputs)) {
+      const outputId = Number(outputIdStr);
+      if (outputValue > 0) {
+        for (let physicalPos = 0; physicalPos < analogMapping.length; physicalPos++) {
+          if (analogMapping[physicalPos] === outputId) {
+            analogValueBySrc[physicalPos] = outputValue;
+          }
+        }
       }
     }
   }

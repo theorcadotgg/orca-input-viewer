@@ -19,6 +19,7 @@ const stopObs = document.getElementById('stopObs');
 const obsUrl = document.getElementById('obsUrl');
 const copyObs = document.getElementById('copyObs');
 const frameRate = document.getElementById('frameRate');
+const inputMode = document.getElementById('inputMode');
 
 // State
 let config = decodeConfig(null);
@@ -102,6 +103,22 @@ function setConfigStatus(loaded) {
   }
 }
 
+function setInputMode(mode, processName) {
+  inputMode.classList.remove('usb', 'dolphin');
+  if (mode === 'dolphin') {
+    inputMode.classList.add('dolphin');
+    inputMode.textContent = processName ? `Dolphin` : 'Dolphin';
+    inputMode.title = processName ? `Reading from ${processName}` : 'Reading from Dolphin memory';
+  } else if (mode === 'usb') {
+    inputMode.classList.add('usb');
+    inputMode.textContent = 'USB';
+    inputMode.title = 'Reading directly from USB adapter';
+  } else {
+    inputMode.textContent = '';
+    inputMode.title = '';
+  }
+}
+
 function render() {
   const report = lastReport?.ports?.find((p) => p.port === selectedPort);
   const viewerState = computeViewerState(report, config, selectedProfile);
@@ -178,6 +195,7 @@ stopStream.addEventListener('click', async () => {
     isStreaming = false;
     startStream.textContent = 'Start Stream';
     setAdapterStatus(false, false);
+    setInputMode(null);
     frameRate.textContent = 'Idle';
     frameRate.classList.remove('active');
   } catch (err) {
@@ -279,10 +297,17 @@ async function bootstrap() {
   await tauriListen('adapter_error', (event) => {
     console.error('Adapter error:', event.payload);
     setAdapterStatus(false, false);
+    setInputMode(null);
     isStreaming = false;
     startStream.textContent = 'Start Stream';
     loadHint.textContent = `Adapter error: ${event.payload}`;
     loadHint.style.color = 'var(--danger)';
+  });
+
+  // Listen for input mode changes
+  await tauriListen('input_mode', (event) => {
+    const { mode, process_name } = event.payload;
+    setInputMode(mode, process_name);
   });
 
   // Try to load any cached config

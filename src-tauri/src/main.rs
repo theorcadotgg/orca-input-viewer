@@ -1,5 +1,6 @@
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,9 @@ use serde::Serialize;
 use serialport::{SerialPortInfo, SerialPortType};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tiny_http::{Header, ListenAddr, Response, Server};
+use tungstenite::{accept, Message, WebSocket};
+
+mod dolphin;
 
 const ADAPTER_VID: u16 = 0x057e;
 const ADAPTER_PID: u16 = 0x0337;
@@ -73,11 +77,14 @@ struct InputReport {
     ports: Vec<PortReport>,
 }
 
+type WsClients = Arc<RwLock<Vec<Arc<Mutex<WebSocket<TcpStream>>>>>>;
+
 #[derive(Default)]
 struct SharedState {
     last_report: Mutex<Option<InputReport>>,
     config_blob_b64: Mutex<Option<String>>,
     selected_profile: Mutex<u8>,
+    ws_clients: WsClients,
 }
 
 #[derive(Default)]
@@ -87,7 +94,9 @@ struct AppState {
     adapter_handle: Mutex<Option<JoinHandle<()>>>,
     overlay_running: Arc<AtomicBool>,
     overlay_port: Mutex<Option<u16>>,
+    overlay_ws_port: Mutex<Option<u16>>,
     overlay_handle: Mutex<Option<JoinHandle<()>>>,
+    ws_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Debug)]
@@ -116,6 +125,37 @@ struct LoadConfigResult {
 #[derive(Debug, Serialize)]
 struct OverlayServerInfo {
     url: String,
+    ws_url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct InputModeInfo {
+    mode: String,
+    process_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct WsStateMessage {
+    input: Option<InputReport>,
+    #[serde(rename = "blobBase64")]
+    blob_base64: Option<String>,
+    profile: u8,
+}
+
+fn broadcast_to_ws_clients(clients: &WsClients, message: &str) {
+    let mut clients_guard = match clients.write() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+
+    // Remove disconnected clients and send to connected ones
+    clients_guard.retain(|client| {
+        if let Ok(mut ws) = client.lock() {
+            ws.send(Message::Text(message.to_string())).is_ok()
+        } else {
+            false
+        }
+    });
 }
 
 fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
@@ -496,42 +536,128 @@ fn start_adapter_stream(app: AppHandle, state: State<'_, AppState>) -> Result<()
     let shared = state.shared.clone();
 
     let handle = thread::spawn(move || {
-        let (_ctx, mut usb) = match open_adapter() {
-            Ok(ok) => ok,
-            Err(err) => {
-                let _ = app.emit("adapter_error", err);
-                running.store(false, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        let _ = begin_polling(&mut usb);
-        let mut buf = [0u8; 64];
-
-        while running.load(Ordering::SeqCst) {
-            match usb.read_interrupt(ADAPTER_IN_EP, &mut buf, Duration::from_millis(100)) {
-                Ok(len) => {
-                    if let Some(report) = parse_adapter_report(&buf[..len]) {
-                        if let Ok(mut guard) = shared.last_report.lock() {
-                            *guard = Some(report.clone());
-                        }
-                        let _ = app.emit("input_report", report);
-                    }
+        // Check if Dolphin/Slippi is running
+        if let Some(dolphin_process) = dolphin::find_dolphin_process() {
+            // Try Dolphin memory mode
+            match dolphin::DolphinReader::new(&dolphin_process) {
+                Ok(reader) => {
+                    let _ = app.emit(
+                        "input_mode",
+                        InputModeInfo {
+                            mode: "dolphin".to_string(),
+                            process_name: Some(dolphin_process.name.clone()),
+                        },
+                    );
+                    run_dolphin_stream(app, running, shared, reader);
+                    return;
                 }
-                Err(UsbError::Timeout) => continue,
-                Err(e) => {
-                    let _ = app.emit("adapter_error", format!("Adapter read error: {e}"));
-                    break;
+                Err(err) => {
+                    // Log the error but fall through to USB mode
+                    eprintln!("Dolphin memory mode failed: {err}");
                 }
             }
         }
 
-        stop_polling(&mut usb);
-        running.store(false, Ordering::SeqCst);
+        // Fall back to USB mode
+        let _ = app.emit(
+            "input_mode",
+            InputModeInfo {
+                mode: "usb".to_string(),
+                process_name: None,
+            },
+        );
+        run_usb_stream(app, running, shared);
     });
 
     *state.adapter_handle.lock().unwrap() = Some(handle);
     Ok(())
+}
+
+fn run_dolphin_stream(
+    app: AppHandle,
+    running: Arc<AtomicBool>,
+    shared: Arc<SharedState>,
+    reader: dolphin::DolphinReader,
+) {
+    // Poll at ~125Hz to match GC adapter rate
+    let poll_interval = Duration::from_millis(8);
+
+    while running.load(Ordering::SeqCst) {
+        match reader.read_controller_state() {
+            Ok(report) => {
+                if let Ok(mut guard) = shared.last_report.lock() {
+                    *guard = Some(report.clone());
+                }
+                let _ = app.emit("input_report", &report);
+
+                // Broadcast to WebSocket clients
+                let blob = shared.config_blob_b64.lock().ok().and_then(|g| g.clone());
+                let profile = shared.selected_profile.lock().ok().map(|g| *g).unwrap_or(0);
+                let ws_msg = WsStateMessage {
+                    input: Some(report),
+                    blob_base64: blob,
+                    profile,
+                };
+                if let Ok(json) = serde_json::to_string(&ws_msg) {
+                    broadcast_to_ws_clients(&shared.ws_clients, &json);
+                }
+            }
+            Err(e) => {
+                let _ = app.emit("adapter_error", format!("Dolphin read error: {e}"));
+                break;
+            }
+        }
+        thread::sleep(poll_interval);
+    }
+
+    running.store(false, Ordering::SeqCst);
+}
+
+fn run_usb_stream(app: AppHandle, running: Arc<AtomicBool>, shared: Arc<SharedState>) {
+    let (_ctx, mut usb) = match open_adapter() {
+        Ok(ok) => ok,
+        Err(err) => {
+            let _ = app.emit("adapter_error", err);
+            running.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+
+    let _ = begin_polling(&mut usb);
+    let mut buf = [0u8; 64];
+
+    while running.load(Ordering::SeqCst) {
+        match usb.read_interrupt(ADAPTER_IN_EP, &mut buf, Duration::from_millis(100)) {
+            Ok(len) => {
+                if let Some(report) = parse_adapter_report(&buf[..len]) {
+                    if let Ok(mut guard) = shared.last_report.lock() {
+                        *guard = Some(report.clone());
+                    }
+                    let _ = app.emit("input_report", &report);
+
+                    // Broadcast to WebSocket clients
+                    let blob = shared.config_blob_b64.lock().ok().and_then(|g| g.clone());
+                    let profile = shared.selected_profile.lock().ok().map(|g| *g).unwrap_or(0);
+                    let ws_msg = WsStateMessage {
+                        input: Some(report),
+                        blob_base64: blob,
+                        profile,
+                    };
+                    if let Ok(json) = serde_json::to_string(&ws_msg) {
+                        broadcast_to_ws_clients(&shared.ws_clients, &json);
+                    }
+                }
+            }
+            Err(UsbError::Timeout) => continue,
+            Err(e) => {
+                let _ = app.emit("adapter_error", format!("Adapter read error: {e}"));
+                break;
+            }
+        }
+    }
+
+    stop_polling(&mut usb);
+    running.store(false, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -622,7 +748,7 @@ fn show_overlay_window(app: AppHandle) -> Result<(), String> {
         .get_webview_window("overlay")
         .ok_or_else(|| "Overlay window not found".to_string())?;
     window.show().map_err(map_tauri_err)?;
-    window.set_always_on_top(true).map_err(map_tauri_err)?;
+    // Don't set always-on-top by default - user can toggle if needed
     Ok(())
 }
 
@@ -636,16 +762,29 @@ fn hide_overlay_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_overlay_always_on_top(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("overlay")
+        .ok_or_else(|| "Overlay window not found".to_string())?;
+    window.set_always_on_top(enabled).map_err(map_tauri_err)?;
+    Ok(())
+}
+
+#[tauri::command]
 fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo, String> {
     if state.overlay_running.swap(true, Ordering::SeqCst) {
         let port = state.overlay_port.lock().unwrap().unwrap_or(0);
+        let ws_port = state.overlay_ws_port.lock().unwrap().unwrap_or(0);
         return Ok(OverlayServerInfo {
             url: format!("http://127.0.0.1:{port}/overlay"),
+            ws_url: format!("ws://127.0.0.1:{ws_port}"),
         });
     }
 
     let running = state.overlay_running.clone();
     let shared = state.shared.clone();
+
+    // Start HTTP server
     let server = match Server::http("127.0.0.1:0") {
         Ok(server) => server,
         Err(e) => {
@@ -661,6 +800,48 @@ fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo,
     };
     *state.overlay_port.lock().unwrap() = Some(port);
 
+    // Start WebSocket server
+    let ws_listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(e) => {
+            state.overlay_running.store(false, Ordering::SeqCst);
+            return Err(format!("WebSocket server start failed: {e}"));
+        }
+    };
+    let ws_port = ws_listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    *state.overlay_ws_port.lock().unwrap() = Some(ws_port);
+
+    // Set non-blocking so we can check running flag
+    let _ = ws_listener.set_nonblocking(true);
+
+    let ws_running = running.clone();
+    let ws_clients = state.shared.ws_clients.clone();
+
+    // WebSocket accept thread
+    let ws_handle = thread::spawn(move || {
+        while ws_running.load(Ordering::SeqCst) {
+            match ws_listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    if let Ok(websocket) = accept(stream) {
+                        if let Ok(mut clients) = ws_clients.write() {
+                            clients.push(Arc::new(Mutex::new(websocket)));
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    });
+    *state.ws_handle.lock().unwrap() = Some(ws_handle);
+
+    // HTTP server thread
+    let http_shared = shared.clone();
     let handle = thread::spawn(move || {
         while running.load(Ordering::SeqCst) {
             match server.recv_timeout(Duration::from_millis(200)) {
@@ -681,19 +862,30 @@ fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo,
                             .with_header(content_type("text/css; charset=utf-8")),
                         "/lib/orca-viewer.js" => Response::from_string(ORCA_VIEWER_JS)
                             .with_header(content_type("application/javascript; charset=utf-8")),
+                        "/lib/orcaMappings.js" => Response::from_string(ORCA_MAPPINGS_JS)
+                            .with_header(content_type("application/javascript; charset=utf-8")),
+                        "/lib/settingsBlob.js" => Response::from_string(SETTINGS_BLOB_JS)
+                            .with_header(content_type("application/javascript; charset=utf-8")),
+                        "/lib/constants.js" => Response::from_string(CONSTANTS_JS)
+                            .with_header(content_type("application/javascript; charset=utf-8")),
                         "/assets/ORCATOPBLANKTEMPLATE-Edge_Cuts.svg" => Response::from_data(ORCA_SVG)
                             .with_header(content_type("image/svg+xml")),
                         "/config" => {
-                            let blob = shared.config_blob_b64.lock().ok().and_then(|g| g.clone());
+                            let blob = http_shared.config_blob_b64.lock().ok().and_then(|g| g.clone());
                             let body = serde_json::json!({ "blobBase64": blob });
                             Response::from_string(body.to_string())
                                 .with_header(content_type("application/json"))
                         }
                         "/state" => {
-                            let report = shared.last_report.lock().ok().and_then(|g| g.clone());
-                            let blob = shared.config_blob_b64.lock().ok().and_then(|g| g.clone());
-                            let profile = shared.selected_profile.lock().ok().map(|g| *g).unwrap_or(0);
+                            let report = http_shared.last_report.lock().ok().and_then(|g| g.clone());
+                            let blob = http_shared.config_blob_b64.lock().ok().and_then(|g| g.clone());
+                            let profile = http_shared.selected_profile.lock().ok().map(|g| *g).unwrap_or(0);
                             let body = serde_json::json!({ "input": report, "blobBase64": blob, "profile": profile });
+                            Response::from_string(body.to_string())
+                                .with_header(content_type("application/json"))
+                        }
+                        "/ws-port" => {
+                            let body = serde_json::json!({ "port": ws_port });
                             Response::from_string(body.to_string())
                                 .with_header(content_type("application/json"))
                         }
@@ -711,13 +903,23 @@ fn start_overlay_server(state: State<'_, AppState>) -> Result<OverlayServerInfo,
     *state.overlay_handle.lock().unwrap() = Some(handle);
     Ok(OverlayServerInfo {
         url: format!("http://127.0.0.1:{port}/overlay"),
+        ws_url: format!("ws://127.0.0.1:{ws_port}"),
     })
 }
 
 #[tauri::command]
 fn stop_overlay_server(state: State<'_, AppState>) -> Result<(), String> {
     state.overlay_running.store(false, Ordering::SeqCst);
+
+    // Clear WebSocket clients
+    if let Ok(mut clients) = state.shared.ws_clients.write() {
+        clients.clear();
+    }
+
     if let Some(handle) = state.overlay_handle.lock().unwrap().take() {
+        let _ = handle.join();
+    }
+    if let Some(handle) = state.ws_handle.lock().unwrap().take() {
         let _ = handle.join();
     }
     Ok(())
@@ -735,6 +937,9 @@ static OVERLAY_HTML: &str = include_str!("../../ui/overlay.html");
 static OVERLAY_JS: &str = include_str!("../../ui/overlay.js");
 static STYLES_CSS: &str = include_str!("../../ui/styles.css");
 static ORCA_VIEWER_JS: &str = include_str!("../../ui/lib/orca-viewer.js");
+static ORCA_MAPPINGS_JS: &str = include_str!("../../ui/lib/orcaMappings.js");
+static SETTINGS_BLOB_JS: &str = include_str!("../../ui/lib/settingsBlob.js");
+static CONSTANTS_JS: &str = include_str!("../../ui/lib/constants.js");
 static ORCA_SVG: &[u8] = include_bytes!("../../ui/assets/ORCATOPBLANKTEMPLATE-Edge_Cuts.svg");
 
 fn map_tauri_err(err: tauri::Error) -> String {
@@ -754,6 +959,7 @@ fn main() {
             get_selected_profile,
             show_overlay_window,
             hide_overlay_window,
+            set_overlay_always_on_top,
             start_overlay_server,
             stop_overlay_server,
         ])

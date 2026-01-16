@@ -8,6 +8,14 @@
   </head>
   <body class="overlay">
     <div class="overlay-root">
+      <div class="overlay-titlebar" data-tauri-drag-region>
+        <span class="overlay-title" data-tauri-drag-region>Orca Overlay</span>
+        <div class="overlay-controls">
+          <button class="overlay-btn" id="toggleChroma" title="Toggle chroma key background">BG</button>
+          <button class="overlay-btn" id="togglePin" title="Toggle always on top">Pin</button>
+          <button class="overlay-btn close" id="closeOverlay" title="Hide overlay">X</button>
+        </div>
+      </div>
       <div class="viewer-card">
         <svg id="orcaDiagram" class="viewer-svg" viewBox="-5 175 342 205" preserveAspectRatio="xMidYMid meet" aria-label="Orca input viewer"></svg>
       </div>

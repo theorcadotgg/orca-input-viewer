@@ -1,8 +1,14 @@
 import { applyState, buildDiagram, computeViewerState, decodeConfig } from './lib/orca-viewer.js';
 
 const svg = document.getElementById('orcaDiagram');
+const toggleChromaBtn = document.getElementById('toggleChroma');
+const togglePinBtn = document.getElementById('togglePin');
+const closeOverlayBtn = document.getElementById('closeOverlay');
+
 let config = decodeConfig(null);
 let selectedProfile = config.activeProfile ?? 0;
+let isPinned = false;
+let ws = null;
 
 buildDiagram(svg);
 
@@ -40,6 +46,46 @@ async function loadConfigFromBackend() {
   }
 }
 
+// WebSocket-based state updates (much faster than HTTP polling)
+function connectWebSocket(wsUrl) {
+  if (ws) {
+    ws.close();
+  }
+
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    console.log('WebSocket connected');
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.blobBase64) {
+        config = decodeConfig(data.blobBase64);
+      }
+      if (typeof data.profile === 'number') {
+        selectedProfile = data.profile;
+      } else {
+        selectedProfile = config.activeProfile ?? 0;
+      }
+      render(data.input?.ports ? data.input.ports[0] : data.input);
+    } catch (err) {
+      console.warn('WebSocket message parse error:', err);
+    }
+  };
+
+  ws.onclose = () => {
+    console.log('WebSocket closed, reconnecting...');
+    setTimeout(() => connectWebSocket(wsUrl), 1000);
+  };
+
+  ws.onerror = (err) => {
+    console.warn('WebSocket error:', err);
+  };
+}
+
+// Fallback HTTP polling for browser source mode
 async function pollState() {
   try {
     const res = await fetch('/state');
@@ -48,7 +94,6 @@ async function pollState() {
     if (data.blobBase64) {
       config = decodeConfig(data.blobBase64);
     }
-    // Use profile from backend if available, otherwise fall back to config's active profile
     if (typeof data.profile === 'number') {
       selectedProfile = data.profile;
     } else {
@@ -58,12 +103,61 @@ async function pollState() {
   } catch (err) {
     console.warn(err);
   } finally {
-    setTimeout(pollState, 100);
+    setTimeout(pollState, 16); // ~60fps polling as fallback
   }
+}
+
+// Try to get WebSocket port and connect
+async function tryWebSocketConnection() {
+  try {
+    const res = await fetch('/ws-port');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.port) {
+        const wsUrl = `ws://127.0.0.1:${data.port}`;
+        connectWebSocket(wsUrl);
+        return true;
+      }
+    }
+  } catch (err) {
+    console.warn('Could not get WebSocket port:', err);
+  }
+  return false;
+}
+
+// Overlay controls
+if (toggleChromaBtn) {
+  toggleChromaBtn.addEventListener('click', () => {
+    document.body.classList.toggle('chroma-mode');
+    toggleChromaBtn.classList.toggle('active', document.body.classList.contains('chroma-mode'));
+  });
+}
+
+if (togglePinBtn) {
+  togglePinBtn.addEventListener('click', async () => {
+    isPinned = !isPinned;
+    togglePinBtn.classList.toggle('active', isPinned);
+    try {
+      await tauriInvoke('set_overlay_always_on_top', { enabled: isPinned });
+    } catch (err) {
+      console.warn('Failed to toggle always on top:', err);
+    }
+  });
+}
+
+if (closeOverlayBtn) {
+  closeOverlayBtn.addEventListener('click', async () => {
+    try {
+      await tauriInvoke('hide_overlay_window');
+    } catch (err) {
+      console.warn('Failed to hide overlay:', err);
+    }
+  });
 }
 
 async function bootstrap() {
   if (window.__TAURI__) {
+    // Running as Tauri window - use native events
     await loadConfigFromBackend();
     await tauriListen('input_report', (event) => render(event.payload));
 
@@ -88,7 +182,12 @@ async function bootstrap() {
       }
     });
   } else {
-    pollState();
+    // Running as browser source - try WebSocket first, fallback to polling
+    const wsConnected = await tryWebSocketConnection();
+    if (!wsConnected) {
+      console.log('WebSocket not available, falling back to HTTP polling');
+      pollState();
+    }
   }
 }
 
