@@ -380,12 +380,12 @@ export function computeViewerState(report, config, profileIndex) {
     if (substickY > cstickThreshold) activeGccOutputs.add(9);    // C Up
     if (substickY < -cstickThreshold) activeGccOutputs.add(10);  // C Down
 
-    // Reverse mapping: for each active GCC output, find physical buttons that produce it
-    for (let physicalBtn = 0; physicalBtn < digitalMapping.length; physicalBtn++) {
-      const outputId = digitalMapping[physicalBtn];
-      if (activeGccOutputs.has(outputId)) {
-        digitalActiveBySrc[physicalBtn] = true;
-        digitalValueBySrc[physicalBtn] = 1;
+    // Light up based on received GCC output directly
+    // The mapping is for display labels, not signal routing
+    for (const outputId of activeGccOutputs) {
+      if (outputId < digitalActiveBySrc.length) {
+        digitalActiveBySrc[outputId] = true;
+        digitalValueBySrc[outputId] = 1;
       }
     }
 
@@ -476,7 +476,8 @@ function analogThresholds(srcId, policy) {
     const full = policy.digitalFullPress ?? 0.8;
     return { light, mid: (light + full) / 2, full };
   }
-  return { light: 0.25, mid: 0.55, full: 0.85 };
+  // Default thresholds: full press at 0.80 for white outline
+  return { light: 0.25, mid: 0.55, full: 0.80 };
 }
 
 function circleIndexToSource(circleIndex) {
