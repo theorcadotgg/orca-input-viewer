@@ -158,6 +158,7 @@ if (closeOverlayBtn) {
 async function bootstrap() {
   if (window.__TAURI__) {
     // Running as Tauri window - use native events
+    document.body.classList.add('tauri-mode');
     await loadConfigFromBackend();
     await tauriListen('input_report', (event) => render(event.payload));
 
@@ -182,7 +183,10 @@ async function bootstrap() {
       }
     });
   } else {
-    // Running as browser source - try WebSocket first, fallback to polling
+    // Running as browser source (OBS) - hide titlebar, use black background
+    document.body.classList.add('browser-mode');
+
+    // Try WebSocket first, fallback to polling
     const wsConnected = await tryWebSocketConnection();
     if (!wsConnected) {
       console.log('WebSocket not available, falling back to HTTP polling');

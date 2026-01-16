@@ -513,7 +513,22 @@ body.overlay {
   border-radius: 0;
 }
 
-/* Chroma Key Mode - green screen for OBS */
+/* Browser Source Mode (OBS) - black background, no titlebar */
+body.overlay.browser-mode {
+  background: #000 !important;
+}
+
+body.overlay.browser-mode .overlay-titlebar {
+  display: none;
+}
+
+body.overlay.browser-mode .overlay-root .viewer-card {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+/* Chroma Key Mode - green screen for OBS (native overlay only) */
 body.overlay.chroma-mode {
   background: #00ff00 !important;
 }
