@@ -20,6 +20,8 @@ const obsUrl = document.getElementById('obsUrl');
 const copyObs = document.getElementById('copyObs');
 const frameRate = document.getElementById('frameRate');
 const inputMode = document.getElementById('inputMode');
+const modeDolphin = document.getElementById('modeDolphin');
+const modeStandalone = document.getElementById('modeStandalone');
 
 // State
 let config = decodeConfig(null);
@@ -29,6 +31,7 @@ let lastReport = null;
 let lastFrameTime = 0;
 let frameCount = 0;
 let isStreaming = false;
+let selectedInputMode = 'dolphin'; // Default to Dolphin mode
 
 // Build the SVG diagram
 buildDiagram(svg);
@@ -171,11 +174,33 @@ profileSelect.addEventListener('change', (e) => {
   tauriEmit('profile_changed', { profile: selectedProfile });
 });
 
+// Input Mode Toggle
+function updateModeToggle() {
+  modeDolphin.classList.toggle('active', selectedInputMode === 'dolphin');
+  modeStandalone.classList.toggle('active', selectedInputMode === 'usb');
+}
+
+modeDolphin.addEventListener('click', () => {
+  selectedInputMode = 'dolphin';
+  updateModeToggle();
+});
+
+modeStandalone.addEventListener('click', () => {
+  selectedInputMode = 'usb';
+  updateModeToggle();
+});
+
 startStream.addEventListener('click', async () => {
   startStream.disabled = true;
   setAdapterStatus(false, true);
+
+  if (selectedInputMode === 'dolphin') {
+    loadHint.textContent = 'Waiting for Dolphin/Slippi...';
+    loadHint.style.color = '';
+  }
+
   try {
-    await tauriInvoke('start_adapter_stream');
+    await tauriInvoke('start_adapter_stream', { mode: selectedInputMode });
     isStreaming = true;
     startStream.textContent = 'Streaming...';
   } catch (err) {
@@ -183,6 +208,7 @@ startStream.addEventListener('click', async () => {
     setAdapterStatus(false, false);
     // Show error in hint
     loadHint.textContent = `Stream error: ${err.message || err}`;
+    loadHint.style.color = 'var(--danger)';
   } finally {
     startStream.disabled = false;
   }
@@ -286,6 +312,7 @@ async function bootstrap() {
   initCollapsibleSections();
   updatePortOptions();
   updateProfileOptions();
+  updateModeToggle(); // Initialize mode toggle state
   render();
 
   // Listen for input reports

@@ -175,6 +175,49 @@ body.overlay {
   gap: 6px;
 }
 
+/* Toggle Group */
+.toggle-group {
+  display: flex;
+  gap: 0;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.toggle-btn {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--bg-elevated);
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.toggle-btn:not(:last-child) {
+  border-right: 1px solid var(--border);
+}
+
+.toggle-btn:hover:not(.active) {
+  background: var(--bg-surface);
+  color: var(--text);
+}
+
+.toggle-btn.active {
+  background: var(--accent-emphasis);
+  color: #fff;
+}
+
+.toggle-btn.active[data-mode="dolphin"] {
+  background: var(--success);
+}
+
+.toggle-btn.active[data-mode="usb"] {
+  background: var(--accent-emphasis);
+}
+
 .url-row {
   display: flex;
   gap: 6px;

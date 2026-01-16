@@ -527,7 +527,7 @@ fn parse_adapter_report(data: &[u8]) -> Option<InputReport> {
 }
 
 #[tauri::command]
-fn start_adapter_stream(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+fn start_adapter_stream(app: AppHandle, state: State<'_, AppState>, mode: String) -> Result<(), String> {
     if state.adapter_running.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
@@ -536,9 +536,37 @@ fn start_adapter_stream(app: AppHandle, state: State<'_, AppState>) -> Result<()
     let shared = state.shared.clone();
 
     let handle = thread::spawn(move || {
-        // Check if Dolphin/Slippi is running
+        if mode == "dolphin" {
+            // Dolphin mode: wait for Dolphin to be detected
+            run_dolphin_mode(app, running, shared);
+        } else {
+            // USB/Standalone mode: direct USB connection
+            let _ = app.emit(
+                "input_mode",
+                InputModeInfo {
+                    mode: "usb".to_string(),
+                    process_name: None,
+                },
+            );
+            run_usb_stream(app, running, shared);
+        }
+    });
+
+    *state.adapter_handle.lock().unwrap() = Some(handle);
+    Ok(())
+}
+
+fn run_dolphin_mode(app: AppHandle, running: Arc<AtomicBool>, shared: Arc<SharedState>) {
+    // Poll for Dolphin process every 500ms until found or stopped
+    let poll_interval = Duration::from_millis(500);
+
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            return;
+        }
+
         if let Some(dolphin_process) = dolphin::find_dolphin_process() {
-            // Try Dolphin memory mode
+            // Try to connect to Dolphin memory
             match dolphin::DolphinReader::new(&dolphin_process) {
                 Ok(reader) => {
                     let _ = app.emit(
@@ -552,25 +580,16 @@ fn start_adapter_stream(app: AppHandle, state: State<'_, AppState>) -> Result<()
                     return;
                 }
                 Err(err) => {
-                    // Log the error but fall through to USB mode
-                    eprintln!("Dolphin memory mode failed: {err}");
+                    // Dolphin found but couldn't connect - report error and stop
+                    let _ = app.emit("adapter_error", format!("Dolphin found but couldn't connect: {err}"));
+                    running.store(false, Ordering::SeqCst);
+                    return;
                 }
             }
         }
 
-        // Fall back to USB mode
-        let _ = app.emit(
-            "input_mode",
-            InputModeInfo {
-                mode: "usb".to_string(),
-                process_name: None,
-            },
-        );
-        run_usb_stream(app, running, shared);
-    });
-
-    *state.adapter_handle.lock().unwrap() = Some(handle);
-    Ok(())
+        thread::sleep(poll_interval);
+    }
 }
 
 fn run_dolphin_stream(
