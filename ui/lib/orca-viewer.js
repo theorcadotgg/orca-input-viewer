@@ -319,96 +319,96 @@ export function buildDiagram(svg) {
 
 export function computeViewerState(report, config, profileIndex) {
   const profile = Math.min(profileIndex ?? config.activeProfile ?? 0, 7);
-  const triggerPolicy = config.triggerPolicy[profile] ?? defaultTriggerPolicy();
+  const digitalMapping = config.digitalMappings?.[profile] ?? defaultDigitalMapping();
+  const analogMapping = config.analogMappings?.[profile] ?? defaultAnalogMapping();
+  const triggerPolicy = config.triggerPolicy?.[profile] ?? defaultTriggerPolicy();
 
-  // Digital button states (indexed by DIGITAL_INPUTS id)
-  // 0=A, 1=B, 2=X, 3=Y, 4=Z, 5=L, 6=R, 7=C<, 8=C>, 9=C^, 10=Cv, 11=D, 12=LS, 13=St
+  // Physical button states (indexed by physical Orca button position)
   const digitalActiveBySrc = Array.from({ length: 17 }, () => false);
   const digitalValueBySrc = Array.from({ length: 17 }, () => 0);
 
-  // Analog values (indexed by ANALOG_INPUTS id)
-  // 0=Stick Left, 1=Stick Right, 2=Stick Up, 3=Stick Down, 4=Trigger R
+  // Analog values (indexed by physical analog input position)
   const analogValueBySrc = Array.from({ length: 5 }, () => 0);
+
+  // Labels based on what each physical button outputs (from profile mapping)
+  const digitalLabelBySrc = digitalMapping.map(outputId => {
+    const entry = DIGITAL_INPUTS.find(d => d.id === outputId);
+    return entry ? entry.shortLabel : 'Off';
+  });
+
+  const analogLabelBySrc = analogMapping.map(outputId => {
+    if (outputId === ORCA_ANALOG_DISABLED) return 'Off';
+    const entry = ANALOG_INPUTS.find(a => a.id === outputId);
+    return entry ? entry.shortLabel : 'Off';
+  });
 
   if (report) {
     const buttons = report.buttons ?? {};
     const axes = report.axes ?? {};
 
-    // Debug: log any button press
-    const pressedButtons = Object.entries(buttons).filter(([k, v]) => v === true).map(([k]) => k);
-    if (pressedButtons.length > 0) {
-      console.log('Pressed buttons:', pressedButtons, 'Axes:', axes);
-    }
+    // Determine which GCC outputs are active from adapter signals
+    // GCC output IDs: 0=A, 1=B, 2=X, 3=Y, 4=Z, 5=L, 6=R, 7=C<, 8=C>, 9=C^, 10=Cv, 11=D, 12=LS, 13=St
+    const activeGccOutputs = new Set();
 
-    // Direct button mapping from adapter
-    if (buttons.a) { digitalActiveBySrc[0] = true; digitalValueBySrc[0] = 1; }
-    if (buttons.b) { digitalActiveBySrc[1] = true; digitalValueBySrc[1] = 1; }
-    if (buttons.x) { digitalActiveBySrc[2] = true; digitalValueBySrc[2] = 1; }
-    if (buttons.y) { digitalActiveBySrc[3] = true; digitalValueBySrc[3] = 1; }
-    if (buttons.start) { digitalActiveBySrc[13] = true; digitalValueBySrc[13] = 1; }
+    if (buttons.a) activeGccOutputs.add(0);  // A
+    if (buttons.b) activeGccOutputs.add(1);  // B
+    if (buttons.x) activeGccOutputs.add(2);  // X
+    if (buttons.y) activeGccOutputs.add(3);  // Y
+    if (buttons.z || buttons.dpad_right) activeGccOutputs.add(4);  // Z (Orca sends via dpad_right)
+    if (buttons.start) activeGccOutputs.add(13);  // Start
 
-    // Orca-specific mappings: Z, L, R are sent through D-pad signals
-    // Z is sent as dpad_right
-    if (buttons.z || buttons.dpad_right) {
-      digitalActiveBySrc[4] = true;  // Z
-      digitalValueBySrc[4] = 1;
-    }
-
-    // L/R digital presses are sent as dpad_up/dpad_down
-    // Analog triggers are used for lightshield detection
-    const triggerL = axes.trigger_l ?? 0;
-    const triggerR = axes.trigger_r ?? 0;
-
-    // Lightshield threshold (partial press below full digital)
-    const lightshieldThreshold = 0.15;
-
-    // L is sent as dpad_up for digital press
-    if (buttons.l || buttons.dpad_up) {
-      digitalActiveBySrc[5] = true;  // L
-      digitalValueBySrc[5] = 1;
-    } else if (triggerL >= lightshieldThreshold) {
-      digitalActiveBySrc[12] = true;  // Lightshield
-      digitalValueBySrc[12] = 1;
-    }
-
-    // R is sent as dpad_down for digital press
+    // L/R detection - Orca sends digital L/R via dpad_up/dpad_down
+    const digitalLPressed = buttons.l || buttons.dpad_up;
     const digitalRPressed = buttons.r || buttons.dpad_down;
-    if (digitalRPressed) {
-      digitalActiveBySrc[6] = true;  // R
-      digitalValueBySrc[6] = 1;
+
+    if (digitalLPressed) activeGccOutputs.add(5);  // L
+    if (digitalRPressed) activeGccOutputs.add(6);  // R
+
+    // Lightshield detection from analog trigger (when L not fully pressed)
+    const triggerL = axes.trigger_l ?? 0;
+    const lightshieldThreshold = 0.15;
+    if (!digitalLPressed && triggerL >= lightshieldThreshold) {
+      activeGccOutputs.add(12);  // Lightshield
     }
 
-    // C-stick as digital buttons (threshold at 0.5)
+    // C-stick as digital outputs (threshold at 0.5)
     const cstickThreshold = 0.5;
     const substickX = axes.substick_x ?? 0;
     const substickY = axes.substick_y ?? 0;
-    if (substickX < -cstickThreshold) { digitalActiveBySrc[7] = true; digitalValueBySrc[7] = 1; }  // C Left
-    if (substickX > cstickThreshold) { digitalActiveBySrc[8] = true; digitalValueBySrc[8] = 1; }   // C Right
-    if (substickY > cstickThreshold) { digitalActiveBySrc[9] = true; digitalValueBySrc[9] = 1; }   // C Up
-    if (substickY < -cstickThreshold) { digitalActiveBySrc[10] = true; digitalValueBySrc[10] = 1; } // C Down
+    if (substickX < -cstickThreshold) activeGccOutputs.add(7);   // C Left
+    if (substickX > cstickThreshold) activeGccOutputs.add(8);    // C Right
+    if (substickY > cstickThreshold) activeGccOutputs.add(9);    // C Up
+    if (substickY < -cstickThreshold) activeGccOutputs.add(10);  // C Down
 
-    // Note: D-pad modifier (id 11) and Lightshield (id 12) are Orca-specific
-    // They will show based on Orca config mappings when config is loaded
-    // For now, don't auto-detect them from raw adapter data
+    // Reverse mapping: for each active GCC output, find physical buttons that produce it
+    for (let physicalBtn = 0; physicalBtn < digitalMapping.length; physicalBtn++) {
+      const outputId = digitalMapping[physicalBtn];
+      if (activeGccOutputs.has(outputId)) {
+        digitalActiveBySrc[physicalBtn] = true;
+        digitalValueBySrc[physicalBtn] = 1;
+      }
+    }
 
-    // Main stick as analog values
+    // Analog stick values
     const stickX = axes.stick_x ?? 0;
     const stickY = axes.stick_y ?? 0;
-    analogValueBySrc[0] = Math.max(0, -stickX);  // Left
-    analogValueBySrc[1] = Math.max(0, stickX);   // Right
-    analogValueBySrc[2] = Math.max(0, stickY);   // Up
-    analogValueBySrc[3] = Math.max(0, -stickY);  // Down
 
-    // Right trigger analog - only show when digital R is not pressed
-    // (digital R press sends both dpad_down AND trigger_r = 1.0)
-    if (!digitalRPressed) {
-      analogValueBySrc[4] = axes.trigger_r ?? 0;
+    // Map analog inputs through profile mapping
+    // analogMapping[physicalInput] = outputId
+    // We need to show the value at the physical position with the remapped label
+    const analogValues = [
+      Math.max(0, -stickX),  // Physical 0: Stick Left
+      Math.max(0, stickX),   // Physical 1: Stick Right
+      Math.max(0, stickY),   // Physical 2: Stick Up
+      Math.max(0, -stickY),  // Physical 3: Stick Down
+      !digitalRPressed ? (axes.trigger_r ?? 0) : 0,  // Physical 4: Trigger R (hide when digital R pressed)
+    ];
+
+    // Apply analog values to their physical positions
+    for (let i = 0; i < analogValues.length; i++) {
+      analogValueBySrc[i] = analogValues[i];
     }
   }
-
-  // Labels for display
-  const digitalLabelBySrc = DIGITAL_INPUTS.map(d => d.shortLabel);
-  const analogLabelBySrc = ANALOG_INPUTS.map(a => a.shortLabel);
 
   return {
     digitalActiveBySrc,
