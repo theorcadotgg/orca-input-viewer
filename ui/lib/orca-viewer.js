@@ -372,7 +372,8 @@ export function computeViewerState(report, config, profileIndex) {
     }
 
     // R is sent as dpad_down for digital press
-    if (buttons.r || buttons.dpad_down) {
+    const digitalRPressed = buttons.r || buttons.dpad_down;
+    if (digitalRPressed) {
       digitalActiveBySrc[6] = true;  // R
       digitalValueBySrc[6] = 1;
     }
@@ -398,8 +399,11 @@ export function computeViewerState(report, config, profileIndex) {
     analogValueBySrc[2] = Math.max(0, stickY);   // Up
     analogValueBySrc[3] = Math.max(0, -stickY);  // Down
 
-    // Right trigger analog
-    analogValueBySrc[4] = axes.trigger_r ?? 0;
+    // Right trigger analog - only show when digital R is not pressed
+    // (digital R press sends both dpad_down AND trigger_r = 1.0)
+    if (!digitalRPressed) {
+      analogValueBySrc[4] = axes.trigger_r ?? 0;
+    }
   }
 
   // Labels for display
