@@ -344,12 +344,6 @@ export function computeViewerState(report, config, profileIndex) {
     if (buttons.r) { digitalActiveBySrc[6] = true; digitalValueBySrc[6] = 1; }
     if (buttons.start) { digitalActiveBySrc[13] = true; digitalValueBySrc[13] = 1; }
 
-    // D-pad - show as single "D" button if any direction pressed
-    if (buttons.dpad_up || buttons.dpad_down || buttons.dpad_left || buttons.dpad_right) {
-      digitalActiveBySrc[11] = true;
-      digitalValueBySrc[11] = 1;
-    }
-
     // C-stick as digital buttons (threshold at 0.5)
     const cstickThreshold = 0.5;
     const substickX = axes.substick_x ?? 0;
@@ -359,12 +353,9 @@ export function computeViewerState(report, config, profileIndex) {
     if (substickY > cstickThreshold) { digitalActiveBySrc[9] = true; digitalValueBySrc[9] = 1; }   // C Up
     if (substickY < -cstickThreshold) { digitalActiveBySrc[10] = true; digitalValueBySrc[10] = 1; } // C Down
 
-    // Lightshield - show when L trigger is partially pressed but L button not fully pressed
-    const triggerL = axes.trigger_l ?? 0;
-    if (triggerL > 0.1 && !buttons.l) {
-      digitalActiveBySrc[12] = true;
-      digitalValueBySrc[12] = 1;
-    }
+    // Note: D-pad modifier (id 11) and Lightshield (id 12) are Orca-specific
+    // They will show based on Orca config mappings when config is loaded
+    // For now, don't auto-detect them from raw adapter data
 
     // Main stick as analog values
     const stickX = axes.stick_x ?? 0;
