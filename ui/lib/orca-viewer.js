@@ -340,9 +340,30 @@ export function computeViewerState(report, config, profileIndex) {
     if (buttons.x) { digitalActiveBySrc[2] = true; digitalValueBySrc[2] = 1; }
     if (buttons.y) { digitalActiveBySrc[3] = true; digitalValueBySrc[3] = 1; }
     if (buttons.z) { digitalActiveBySrc[4] = true; digitalValueBySrc[4] = 1; }
-    if (buttons.l) { digitalActiveBySrc[5] = true; digitalValueBySrc[5] = 1; }
-    if (buttons.r) { digitalActiveBySrc[6] = true; digitalValueBySrc[6] = 1; }
     if (buttons.start) { digitalActiveBySrc[13] = true; digitalValueBySrc[13] = 1; }
+
+    // L/R buttons - Orca sends these as analog trigger values, not digital bits
+    // Check both digital bit AND analog trigger threshold
+    const triggerL = axes.trigger_l ?? 0;
+    const triggerR = axes.trigger_r ?? 0;
+
+    // Full press threshold for digital L/R
+    const fullPressThreshold = 0.85;
+    // Lightshield threshold (partial press)
+    const lightshieldThreshold = 0.15;
+
+    if (buttons.l || triggerL >= fullPressThreshold) {
+      digitalActiveBySrc[5] = true;  // L
+      digitalValueBySrc[5] = 1;
+    } else if (triggerL >= lightshieldThreshold) {
+      digitalActiveBySrc[12] = true;  // Lightshield
+      digitalValueBySrc[12] = 1;
+    }
+
+    if (buttons.r || triggerR >= fullPressThreshold) {
+      digitalActiveBySrc[6] = true;  // R
+      digitalValueBySrc[6] = 1;
+    }
 
     // C-stick as digital buttons (threshold at 0.5)
     const cstickThreshold = 0.5;
