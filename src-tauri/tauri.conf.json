@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Orca Input Viewer",
+  "version": "0.1.0",
+  "identifier": "com.orca.inputviewer",
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Orca Input Viewer",
+        "width": 900,
+        "height": 600,
+        "minWidth": 700,
+        "minHeight": 450,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "center": true
+      },
+      {
+        "label": "overlay",
+        "title": "Orca Overlay",
+        "width": 600,
+        "height": 350,
+        "minWidth": 400,
+        "minHeight": 250,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "url": "overlay.html"
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        "default"
+      ]
+    }
+  }
+}

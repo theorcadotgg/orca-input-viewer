@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orca Input Viewer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <header class="sidebar-header">
+          <h1>Orca Input Viewer</h1>
+          <div class="status-badges">
+            <span class="status-dot" id="adapterDot"></span>
+            <span class="status-label" id="adapterStatus">Offline</span>
+            <span class="status-dot config" id="configDot"></span>
+            <span class="status-label" id="configStatus">Default</span>
+          </div>
+        </header>
+
+        <section class="sidebar-section">
+          <div class="section-row">
+            <div class="inline-control">
+              <label for="portSelect">Port</label>
+              <select class="select-compact" id="portSelect"></select>
+            </div>
+            <div class="inline-control">
+              <label for="profileSelect">Profile</label>
+              <select class="select-compact" id="profileSelect"></select>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="btn primary" id="startStream">Start Stream</button>
+            <button class="btn" id="stopStream">Stop</button>
+          </div>
+        </section>
+
+        <section class="sidebar-section collapsible" data-section="config">
+          <button class="section-toggle" type="button">
+            <span>Config</span>
+            <svg class="chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+          </button>
+          <div class="section-content">
+            <button class="btn accent" id="loadConfig">Load Device Config</button>
+            <p class="hint" id="loadHint">Put Orca into config mode to sync mappings.</p>
+          </div>
+        </section>
+
+        <section class="sidebar-section collapsible" data-section="overlay">
+          <button class="section-toggle" type="button">
+            <span>Overlay & OBS</span>
+            <svg class="chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+          </button>
+          <div class="section-content">
+            <div class="button-row">
+              <button class="btn" id="showOverlay">Show Overlay</button>
+              <button class="btn ghost" id="hideOverlay">Hide</button>
+            </div>
+            <div class="obs-row">
+              <button class="btn" id="startObs">OBS Server</button>
+              <button class="btn ghost" id="stopObs">Stop</button>
+            </div>
+            <div class="url-row">
+              <input class="url-input" id="obsUrl" type="text" readonly value="" placeholder="Server URL..." />
+              <button class="btn icon" id="copyObs" title="Copy URL">
+                <svg width="14" height="14" viewBox="0 0 14 14"><rect x="4" y="4" width="8" height="8" rx="1" stroke="currentColor" fill="none"/><path d="M2 10V2h8" stroke="currentColor" fill="none"/></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <footer class="sidebar-footer">
+          <span class="frame-rate" id="frameRate">Idle</span>
+        </footer>
+      </aside>
+
+      <main class="viewer">
+        <div class="viewer-card">
+          <svg id="orcaDiagram" class="viewer-svg" viewBox="-5 175 342 205" preserveAspectRatio="xMidYMid meet" aria-label="Orca input viewer"></svg>
+        </div>
+      </main>
+    </div>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
