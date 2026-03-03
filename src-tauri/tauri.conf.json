@@ -3,10 +3,27 @@
   "productName": "Orca Input Viewer",
   "version": "0.1.0",
   "identifier": "com.orca.inputviewer",
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com"
+    }
+  },
   "build": {
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
     "frontendDist": "../ui"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/theorcadotgg/orca-obs-viewer/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_ME_TAURI_UPDATER_PUBLIC_KEY"
+    }
   },
   "app": {
     "withGlobalTauri": true,

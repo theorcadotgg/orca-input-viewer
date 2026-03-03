@@ -27,8 +27,17 @@ function tauriListen(event, handler) {
   return tauri.listen ? tauri.listen(event, handler) : Promise.resolve(() => {});
 }
 
+function resolveOverlayPort(report) {
+  const autoPort = report?.auto_port;
+  if (Number.isInteger(autoPort) && autoPort >= 0 && autoPort <= 3) {
+    return autoPort;
+  }
+  return 0;
+}
+
 function render(report) {
-  const portReport = report?.ports?.find((p) => p.port === 0) ?? report;
+  const selectedPort = resolveOverlayPort(report);
+  const portReport = report?.ports?.find((p) => p.port === selectedPort) ?? report;
   const state = computeViewerState(portReport, config, selectedProfile);
   applyState(svg, state);
 }
@@ -69,7 +78,7 @@ function connectWebSocket(wsUrl) {
       } else {
         selectedProfile = config.activeProfile ?? 0;
       }
-      render(data.input?.ports ? data.input.ports[0] : data.input);
+      render(data.input);
     } catch (err) {
       console.warn('WebSocket message parse error:', err);
     }
@@ -99,7 +108,7 @@ async function pollState() {
     } else {
       selectedProfile = config.activeProfile ?? 0;
     }
-    render(data.input?.ports ? data.input.ports[0] : data.input);
+    render(data.input);
   } catch (err) {
     console.warn(err);
   } finally {

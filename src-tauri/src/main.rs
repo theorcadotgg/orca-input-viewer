@@ -75,6 +75,7 @@ struct PortReport {
 #[derive(Clone, Debug, Serialize)]
 struct InputReport {
     ports: Vec<PortReport>,
+    auto_port: Option<u8>,
 }
 
 type WsClients = Arc<RwLock<Vec<Arc<Mutex<WebSocket<TcpStream>>>>>>;
@@ -523,7 +524,10 @@ fn parse_adapter_report(data: &[u8]) -> Option<InputReport> {
         });
     }
 
-    Some(InputReport { ports })
+    Some(InputReport {
+        ports,
+        auto_port: None,
+    })
 }
 
 #[tauri::command]
@@ -963,6 +967,11 @@ static SETTINGS_BLOB_JS: &str = include_str!("../../ui/lib/settingsBlob.js");
 static CONSTANTS_JS: &str = include_str!("../../ui/lib/constants.js");
 static ORCA_SVG: &[u8] = include_bytes!("../../ui/assets/ORCATOPBLANKTEMPLATE-Edge_Cuts.svg");
 
+#[tauri::command]
+fn get_app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 fn map_tauri_err(err: tauri::Error) -> String {
     err.to_string()
 }
@@ -970,6 +979,7 @@ fn map_tauri_err(err: tauri::Error) -> String {
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             start_adapter_stream,
             stop_adapter_stream,
@@ -983,6 +993,7 @@ fn main() {
             set_overlay_always_on_top,
             start_overlay_server,
             stop_overlay_server,
+            get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

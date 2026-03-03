@@ -64,6 +64,18 @@ mod windows {
     /// This is Melee's controller struct, not raw PADStatus
     const MELEE_CONTROLLER_BASE: u32 = 0x804C1FAC;
     const CONTROLLER_STRUCT_SIZE: u32 = 0x44; // 68 bytes per controller
+    const SCENE_MAJOR_ADDR: u32 = 0x80479D30;
+    const SCENE_MINOR_ADDR: u32 = 0x80479D33;
+    const MENU_PLAYER_ONE_PORT_ADDR: u32 = 0x804D6598;
+    const CSSDT_BUF_ADDR: u32 = 0x80005614;
+    const SLIPPI_LOCAL_INDEX_OFFSET: u32 = 0x03;
+
+    const SCENE_VS_ONLINE: u8 = 0x08;
+    const SCENE_VS_ONLINE_CSS: u8 = 0x00;
+    const SCENE_VS_ONLINE_SSS: u8 = 0x01;
+    const SCENE_VS_ONLINE_INGAME: u8 = 0x02;
+    const SCENE_VS_ONLINE_VERSUS: u8 = 0x04;
+    const SCENE_VS_ONLINE_RANKED: u8 = 0x05;
 
     /// Offsets within the Melee controller struct
     const OFFSET_BUTTONS: usize = 0x00;      // u32 buttons pressed
@@ -153,8 +165,7 @@ mod windows {
 
             for port in 0..4u8 {
                 let controller_addr = MELEE_CONTROLLER_BASE + (port as u32 * CONTROLLER_STRUCT_SIZE);
-                // Mask off high bits to get offset within GC RAM (0x80000000 -> 0x00000000)
-                let host_addr = self.gc_ram_base + (controller_addr & 0x01FFFFFF) as usize;
+                let host_addr = self.emu_to_host_addr(controller_addr);
 
                 // Read the full controller struct (68 bytes)
                 let mut buf = [0u8; 0x44];
@@ -244,7 +255,60 @@ mod windows {
                 });
             }
 
-            Ok(InputReport { ports })
+            Ok(InputReport {
+                ports,
+                auto_port: self.detect_slippi_auto_port(),
+            })
+        }
+
+        fn detect_slippi_auto_port(&self) -> Option<u8> {
+            let scene_major = self.read_u8_emu(SCENE_MAJOR_ADDR)?;
+            if scene_major != SCENE_VS_ONLINE {
+                return None;
+            }
+
+            let scene_minor = self.read_u8_emu(SCENE_MINOR_ADDR)?;
+
+            match scene_minor {
+                SCENE_VS_ONLINE_INGAME | SCENE_VS_ONLINE_VERSUS | SCENE_VS_ONLINE_RANKED => {
+                    let slippi_ptr = self.read_u32_emu_be(CSSDT_BUF_ADDR)?;
+                    if (slippi_ptr & 0x8000_0000) == 0 {
+                        return None;
+                    }
+
+                    let local_port = self.read_u8_emu(slippi_ptr.wrapping_add(SLIPPI_LOCAL_INDEX_OFFSET))?;
+                    (local_port <= 3).then_some(local_port)
+                }
+                SCENE_VS_ONLINE_CSS | SCENE_VS_ONLINE_SSS => {
+                    let menu_port = self.read_u8_emu(MENU_PLAYER_ONE_PORT_ADDR)?;
+                    (menu_port <= 3).then_some(menu_port)
+                }
+                _ => None,
+            }
+        }
+
+        fn emu_to_host_addr(&self, emu_addr: u32) -> usize {
+            self.gc_ram_base + (emu_addr & 0x01FF_FFFF) as usize
+        }
+
+        fn read_u8_emu(&self, emu_addr: u32) -> Option<u8> {
+            let host_addr = self.emu_to_host_addr(emu_addr);
+            let mut buf = [0u8; 1];
+            if self.read_memory(host_addr, &mut buf) {
+                Some(buf[0])
+            } else {
+                None
+            }
+        }
+
+        fn read_u32_emu_be(&self, emu_addr: u32) -> Option<u32> {
+            let host_addr = self.emu_to_host_addr(emu_addr);
+            let mut buf = [0u8; 4];
+            if self.read_memory(host_addr, &mut buf) {
+                Some(u32::from_be_bytes(buf))
+            } else {
+                None
+            }
         }
 
         fn read_memory(&self, addr: usize, buf: &mut [u8]) -> bool {
@@ -319,6 +383,18 @@ mod macos {
     /// This is Melee's controller struct, not raw PADStatus
     const MELEE_CONTROLLER_BASE: u32 = 0x804C1FAC;
     const CONTROLLER_STRUCT_SIZE: u32 = 0x44; // 68 bytes per controller
+    const SCENE_MAJOR_ADDR: u32 = 0x80479D30;
+    const SCENE_MINOR_ADDR: u32 = 0x80479D33;
+    const MENU_PLAYER_ONE_PORT_ADDR: u32 = 0x804D6598;
+    const CSSDT_BUF_ADDR: u32 = 0x80005614;
+    const SLIPPI_LOCAL_INDEX_OFFSET: u32 = 0x03;
+
+    const SCENE_VS_ONLINE: u8 = 0x08;
+    const SCENE_VS_ONLINE_CSS: u8 = 0x00;
+    const SCENE_VS_ONLINE_SSS: u8 = 0x01;
+    const SCENE_VS_ONLINE_INGAME: u8 = 0x02;
+    const SCENE_VS_ONLINE_VERSUS: u8 = 0x04;
+    const SCENE_VS_ONLINE_RANKED: u8 = 0x05;
 
     /// Offsets within the Melee controller struct
     const OFFSET_BUTTONS: usize = 0x00;      // u32 buttons pressed
@@ -413,9 +489,7 @@ mod macos {
 
             for port in 0..4u8 {
                 let controller_addr = MELEE_CONTROLLER_BASE + (port as u32 * CONTROLLER_STRUCT_SIZE);
-                // Mask off high bits to get offset within GC RAM (0x80000000 -> 0x00000000)
-                let offset = (controller_addr & 0x01FFFFFF) as u64;
-                let host_addr = self.gc_ram_base + offset;
+                let host_addr = self.emu_to_host_addr(controller_addr);
 
                 // Read the full controller struct (68 bytes)
                 let mut buf = [0u8; 0x44];
@@ -505,7 +579,60 @@ mod macos {
                 });
             }
 
-            Ok(InputReport { ports })
+            Ok(InputReport {
+                ports,
+                auto_port: self.detect_slippi_auto_port(),
+            })
+        }
+
+        fn detect_slippi_auto_port(&self) -> Option<u8> {
+            let scene_major = self.read_u8_emu(SCENE_MAJOR_ADDR)?;
+            if scene_major != SCENE_VS_ONLINE {
+                return None;
+            }
+
+            let scene_minor = self.read_u8_emu(SCENE_MINOR_ADDR)?;
+
+            match scene_minor {
+                SCENE_VS_ONLINE_INGAME | SCENE_VS_ONLINE_VERSUS | SCENE_VS_ONLINE_RANKED => {
+                    let slippi_ptr = self.read_u32_emu_be(CSSDT_BUF_ADDR)?;
+                    if (slippi_ptr & 0x8000_0000) == 0 {
+                        return None;
+                    }
+
+                    let local_port = self.read_u8_emu(slippi_ptr.wrapping_add(SLIPPI_LOCAL_INDEX_OFFSET))?;
+                    (local_port <= 3).then_some(local_port)
+                }
+                SCENE_VS_ONLINE_CSS | SCENE_VS_ONLINE_SSS => {
+                    let menu_port = self.read_u8_emu(MENU_PLAYER_ONE_PORT_ADDR)?;
+                    (menu_port <= 3).then_some(menu_port)
+                }
+                _ => None,
+            }
+        }
+
+        fn emu_to_host_addr(&self, emu_addr: u32) -> mach_vm_address_t {
+            self.gc_ram_base + (emu_addr & 0x01FF_FFFF) as u64
+        }
+
+        fn read_u8_emu(&self, emu_addr: u32) -> Option<u8> {
+            let host_addr = self.emu_to_host_addr(emu_addr);
+            let mut buf = [0u8; 1];
+            if self.read_memory(host_addr, &mut buf) {
+                Some(buf[0])
+            } else {
+                None
+            }
+        }
+
+        fn read_u32_emu_be(&self, emu_addr: u32) -> Option<u32> {
+            let host_addr = self.emu_to_host_addr(emu_addr);
+            let mut buf = [0u8; 4];
+            if self.read_memory(host_addr, &mut buf) {
+                Some(u32::from_be_bytes(buf))
+            } else {
+                None
+            }
         }
 
         fn read_memory(&self, addr: mach_vm_address_t, buf: &mut [u8]) -> bool {

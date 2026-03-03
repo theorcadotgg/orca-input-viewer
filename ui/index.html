@@ -79,7 +79,11 @@
         </section>
 
         <footer class="sidebar-footer">
-          <span class="frame-rate" id="frameRate">Idle</span>
+          <div class="footer-row">
+            <span class="frame-rate" id="frameRate">Idle</span>
+            <button class="link-btn" id="checkUpdates" type="button">Check updates</button>
+          </div>
+          <span class="app-version" id="appVersion"></span>
         </footer>
       </aside>
 
@@ -88,6 +92,20 @@
           <svg id="orcaDiagram" class="viewer-svg" viewBox="-5 175 342 205" preserveAspectRatio="xMidYMid meet" aria-label="Orca input viewer"></svg>
         </div>
       </main>
+    </div>
+
+    <div class="modal hidden" id="updateModal" role="dialog" aria-modal="true" aria-labelledby="updateTitle">
+      <div class="modal-backdrop" id="updateBackdrop"></div>
+      <div class="modal-card">
+        <h2 class="modal-title" id="updateTitle">Update available</h2>
+        <p class="modal-subtitle" id="updateSubtitle"></p>
+        <pre class="modal-notes" id="updateNotes"></pre>
+        <div class="button-row">
+          <button class="btn" id="updateLater" type="button">Later</button>
+          <button class="btn primary" id="updateNow" type="button">Update & Restart</button>
+        </div>
+        <p class="hint" id="updateStatus"></p>
+      </div>
     </div>
 
     <script type="module" src="main.js"></script>

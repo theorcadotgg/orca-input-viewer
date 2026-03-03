@@ -1,0 +1,83 @@
+name: Release (Windows)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate updater pubkey configured
+        shell: pwsh
+        run: |
+          $configPath = "src-tauri/tauri.conf.json"
+          $json = Get-Content $configPath -Raw | ConvertFrom-Json
+          $pubkey = $json.plugins.updater.pubkey
+          if (-not $pubkey) { throw "Missing plugins.updater.pubkey in tauri.conf.json" }
+          if ($pubkey -like "REPLACE_ME*") { throw "Replace plugins.updater.pubkey in tauri.conf.json before releasing." }
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Import Windows code signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_B64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_PFX_B64) { throw "Missing secret WINDOWS_CERT_PFX_B64" }
+          if (-not $env:WINDOWS_CERT_PASSWORD) { throw "Missing secret WINDOWS_CERT_PASSWORD" }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "orca-input-viewer-codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_B64))
+
+          $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERT_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -Password $securePassword -CertStoreLocation Cert:\CurrentUser\My
+          if (-not $cert.Thumbprint) { throw "Failed to import PFX (no thumbprint)." }
+
+          "WINDOWS_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configure Tauri Windows signing
+        shell: pwsh
+        env:
+          WINDOWS_CERT_THUMBPRINT: ${{ env.WINDOWS_CERT_THUMBPRINT }}
+        run: |
+          if (-not $env:WINDOWS_CERT_THUMBPRINT) { throw "Missing env WINDOWS_CERT_THUMBPRINT" }
+
+          $configPath = "src-tauri/tauri.conf.json"
+          $json = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $json.bundle) { $json | Add-Member -NotePropertyName bundle -NotePropertyValue (@{}) }
+          if (-not $json.bundle.windows) { $json.bundle | Add-Member -NotePropertyName windows -NotePropertyValue (@{}) }
+
+          $json.bundle.windows.certificateThumbprint = $env:WINDOWS_CERT_THUMBPRINT
+          $json.bundle.windows.digestAlgorithm = "sha256"
+          $json.bundle.windows.timestampUrl = "http://timestamp.digicert.com"
+          $json.bundle.createUpdaterArtifacts = $true
+
+          $json | ConvertTo-Json -Depth 64 | Set-Content -Path $configPath -Encoding utf8
+
+      - name: Build & publish (GitHub Release + latest.json)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: "src-tauri"
+          args: "--target x86_64-pc-windows-msvc"
+          tagName: ${{ github.ref_name }}
+          releaseName: "Orca Input Viewer ${{ github.ref_name }}"
+          generateReleaseNotes: true
+          prerelease: false
+          updaterJsonPreferNsis: true

@@ -22,6 +22,18 @@ const frameRate = document.getElementById('frameRate');
 const inputMode = document.getElementById('inputMode');
 const modeDolphin = document.getElementById('modeDolphin');
 const modeStandalone = document.getElementById('modeStandalone');
+const checkUpdatesBtn = document.getElementById('checkUpdates');
+const appVersionEl = document.getElementById('appVersion');
+
+// Update Modal Elements
+const updateModal = document.getElementById('updateModal');
+const updateBackdrop = document.getElementById('updateBackdrop');
+const updateTitle = document.getElementById('updateTitle');
+const updateSubtitle = document.getElementById('updateSubtitle');
+const updateNotes = document.getElementById('updateNotes');
+const updateLater = document.getElementById('updateLater');
+const updateNow = document.getElementById('updateNow');
+const updateStatus = document.getElementById('updateStatus');
 
 // State
 let config = decodeConfig(null);
@@ -32,6 +44,8 @@ let lastFrameTime = 0;
 let frameCount = 0;
 let isStreaming = false;
 let selectedInputMode = 'dolphin'; // Default to Dolphin mode
+let pendingUpdate = null;
+let isAutoPortActive = false;
 
 // Build the SVG diagram
 buildDiagram(svg);
@@ -63,6 +77,136 @@ function tauriEmit(event, payload) {
   return Promise.resolve();
 }
 
+function hasUpdater() {
+  const tauri = window.__TAURI__;
+  return Boolean(tauri?.updater?.check && tauri?.updater?.Update);
+}
+
+function openUpdateModal() {
+  if (!updateModal) return;
+  updateModal.classList.remove('hidden');
+}
+
+function closeUpdateModal() {
+  if (!updateModal) return;
+  updateModal.classList.add('hidden');
+}
+
+function setUpdatePrimaryAction(enabled, label) {
+  if (!updateNow) return;
+  updateNow.disabled = !enabled;
+  if (label) updateNow.textContent = label;
+}
+
+function setUpdateStatus(text) {
+  if (!updateStatus) return;
+  updateStatus.textContent = text || '';
+  updateStatus.style.color = '';
+}
+
+function setUpdateError(text) {
+  if (!updateStatus) return;
+  updateStatus.textContent = text || '';
+  updateStatus.style.color = 'var(--danger)';
+}
+
+function normalizeReleaseNotes(body) {
+  if (!body) return 'No release notes provided.';
+  if (typeof body === 'string') return body.trim() || 'No release notes provided.';
+  return String(body);
+}
+
+async function loadAppVersion() {
+  if (!appVersionEl) return;
+  try {
+    const version = await tauriInvoke('get_app_version');
+    if (version) appVersionEl.textContent = `v${version}`;
+  } catch {
+    // No-op; version is optional UI affordance.
+  }
+}
+
+async function checkForUpdates({ userInitiated = false } = {}) {
+  if (!window.__TAURI__) return;
+  if (userInitiated) {
+    if (updateTitle) updateTitle.textContent = 'Updates';
+    if (updateSubtitle) updateSubtitle.textContent = '';
+    if (updateNotes) updateNotes.textContent = '';
+    setUpdatePrimaryAction(false, 'Update');
+    setUpdateStatus('Checking for updates…');
+    openUpdateModal();
+  }
+  if (!hasUpdater()) {
+    if (userInitiated) setUpdateError('Updater is not available in this build.');
+    return;
+  }
+
+  try {
+    const update = await window.__TAURI__.updater.check();
+    pendingUpdate = update;
+
+    if (!update) {
+      if (userInitiated) {
+        setUpdateStatus('No updates available.');
+      }
+      return;
+    }
+
+    if (updateTitle) updateTitle.textContent = 'Update available';
+    if (updateSubtitle) {
+      updateSubtitle.textContent = `v${update.version} available (current: v${update.currentVersion})`;
+    }
+    if (updateNotes) {
+      updateNotes.textContent = normalizeReleaseNotes(update.body);
+    }
+    setUpdatePrimaryAction(true, 'Update & Restart');
+    setUpdateStatus('');
+    openUpdateModal();
+  } catch (err) {
+    if (userInitiated) {
+      setUpdateError(err?.message ?? String(err));
+    } else {
+      // Silent on background checks.
+      console.debug('Update check failed:', err);
+    }
+  }
+}
+
+async function downloadAndInstallUpdate() {
+  if (!pendingUpdate) return;
+  if (updateNow) updateNow.disabled = true;
+  if (updateLater) updateLater.disabled = true;
+  setUpdateStatus('Downloading update…');
+
+  let totalBytes = null;
+  let downloadedBytes = 0;
+
+  try {
+    await pendingUpdate.downloadAndInstall((event) => {
+      if (event?.event === 'started') {
+        totalBytes = event?.data?.contentLength ?? null;
+        downloadedBytes = 0;
+        setUpdateStatus('Downloading update…');
+      } else if (event?.event === 'progress') {
+        downloadedBytes += event?.data?.chunkLength ?? 0;
+        if (typeof totalBytes === 'number' && totalBytes > 0) {
+          const pct = Math.min(100, Math.max(0, Math.round((downloadedBytes / totalBytes) * 100)));
+          setUpdateStatus(`Downloading update… ${pct}%`);
+        } else {
+          setUpdateStatus('Downloading update…');
+        }
+      } else if (event?.event === 'finished') {
+        setUpdateStatus('Launching installer…');
+      }
+    });
+    // On Windows, the updater will launch the installer and exit the app.
+  } catch (err) {
+    setUpdateError(err?.message ?? String(err));
+    if (updateNow) updateNow.disabled = false;
+    if (updateLater) updateLater.disabled = false;
+  }
+}
+
 // UI Update Functions
 function updateProfileOptions() {
   profileSelect.innerHTML = '';
@@ -84,6 +228,7 @@ function updatePortOptions() {
     portSelect.appendChild(option);
   });
   portSelect.value = String(selectedPort);
+  setPortSelectAutoState(isAutoPortActive);
 }
 
 function setAdapterStatus(connected, streaming = false) {
@@ -122,6 +267,23 @@ function setInputMode(mode, processName) {
   }
 }
 
+function resolveAutoPort(report) {
+  const autoPort = report?.auto_port;
+  if (Number.isInteger(autoPort) && autoPort >= 0 && autoPort <= 3) {
+    return autoPort;
+  }
+  return null;
+}
+
+function setPortSelectAutoState(active) {
+  portSelect.disabled = active;
+  if (active) {
+    portSelect.title = 'Auto-following Slippi local player port';
+  } else {
+    portSelect.title = '';
+  }
+}
+
 function render() {
   const report = lastReport?.ports?.find((p) => p.port === selectedPort);
   const viewerState = computeViewerState(report, config, selectedProfile);
@@ -147,6 +309,13 @@ function render() {
 
 function onInputReport(report) {
   lastReport = report;
+  const autoPort = resolveAutoPort(report);
+  isAutoPortActive = autoPort !== null;
+  if (autoPort !== null) {
+    selectedPort = autoPort;
+    portSelect.value = String(selectedPort);
+  }
+  setPortSelectAutoState(isAutoPortActive);
   render();
 }
 
@@ -314,6 +483,14 @@ async function bootstrap() {
   updateProfileOptions();
   updateModeToggle(); // Initialize mode toggle state
   render();
+  await loadAppVersion();
+
+  if (checkUpdatesBtn) {
+    checkUpdatesBtn.addEventListener('click', () => void checkForUpdates({ userInitiated: true }));
+  }
+  if (updateLater) updateLater.addEventListener('click', closeUpdateModal);
+  if (updateBackdrop) updateBackdrop.addEventListener('click', closeUpdateModal);
+  if (updateNow) updateNow.addEventListener('click', () => void downloadAndInstallUpdate());
 
   // Listen for input reports
   await tauriListen('input_report', (event) => {
@@ -351,6 +528,9 @@ async function bootstrap() {
     // Config not available, use defaults
     console.debug('No cached config:', err);
   }
+
+  // Check for updates in the background.
+  void checkForUpdates({ userInitiated: false });
 }
 
 bootstrap();
