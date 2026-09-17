@@ -34,7 +34,7 @@
       "endpoints": [
         "https://github.com/theorcadotgg/orca-obs-viewer/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_ME_TAURI_UPDATER_PUBLIC_KEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwOTdDRUIwRjVDMDU0OUUKUldTZVZNRDFzTTZYTmVL"
     }
   },
   "app": {
