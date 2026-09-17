@@ -72,6 +72,14 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Exclude the workspace from Defender scanning
+        shell: pwsh
+        run: |
+          # Real-time scanning both slows the Rust build down and can hold the freshly
+          # built installer open while it is being uploaded.
+          Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath $env:RUNNER_TEMP -ErrorAction SilentlyContinue
+
       - name: Import Windows code signing certificate
         if: env.WINDOWS_CERT_PFX_B64 != ''
         shell: pwsh
@@ -119,6 +127,7 @@ jobs:
         with:
           projectPath: "src-tauri"
           args: "--target x86_64-pc-windows-msvc"
+          retryAttempts: 3
           releaseId: ${{ needs.prepare.outputs.release_id }}
           tagName: ${{ github.ref_name }}
           releaseDraft: true
@@ -218,6 +227,7 @@ jobs:
         with:
           projectPath: "src-tauri"
           args: "--target aarch64-apple-darwin"
+          retryAttempts: 3
           releaseId: ${{ needs.prepare.outputs.release_id }}
           tagName: ${{ github.ref_name }}
           releaseDraft: true
