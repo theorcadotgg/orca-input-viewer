@@ -4,21 +4,23 @@
 //! allowing the input viewer to work while Dolphin has the USB adapter claimed.
 
 use crate::InputReport;
-use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 
-/// Process names to search for Dolphin/Slippi
-const DOLPHIN_PROCESS_NAMES: &[&str] = &[
-    "Dolphin.exe",
-    "dolphin.exe",
-    "Slippi Dolphin.exe",
-    "Slippi_Dolphin.exe",
-    "DolphinWx.exe",
-    "DolphinQt.exe",
-    // Unix names
-    "dolphin-emu",
-    "slippi-dolphin",
-    "Slippi Dolphin",
-];
+/// Reduce a process name to lowercase letters and digits, so that the same
+/// executable matches on every platform ("Dolphin.exe", "dolphin-emu",
+/// "Slippi_Dolphin" and "Slippi Dolphin" all normalise usefully).
+fn normalize_process_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Dolphin and its forks (Dolphin, Slippi, Ishiiruka) on all platforms.
+pub(crate) fn is_dolphin_process_name(name: &str) -> bool {
+    let normalized = normalize_process_name(name);
+    normalized.starts_with("dolphin") || normalized.starts_with("slippidolphin")
+}
 
 #[derive(Debug)]
 pub struct DolphinProcess {
@@ -29,18 +31,26 @@ pub struct DolphinProcess {
 /// Find a running Dolphin or Slippi process
 pub fn find_dolphin_process() -> Option<DolphinProcess> {
     let system = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::new()),
+        RefreshKind::new()
+            .with_processes(ProcessRefreshKind::new().with_exe(UpdateKind::Always)),
     );
 
     for (pid, process) in system.processes() {
         let name = process.name().to_string();
-        for &dolphin_name in DOLPHIN_PROCESS_NAMES {
-            if name.contains(dolphin_name) || name == dolphin_name {
-                return Some(DolphinProcess {
-                    pid: pid.as_u32(),
-                    name,
-                });
-            }
+        // Some platforms report only the executable name, others part of a path;
+        // the exe stem is the reliable field for macOS Slippi builds.
+        let exe_name = process
+            .exe()
+            .and_then(|path| path.file_name())
+            .map(|file| file.to_string_lossy().into_owned());
+
+        if is_dolphin_process_name(&name)
+            || exe_name.as_deref().is_some_and(is_dolphin_process_name)
+        {
+            return Some(DolphinProcess {
+                pid: pid.as_u32(),
+                name,
+            });
         }
     }
     None
@@ -465,8 +475,10 @@ mod macos {
 
                 if kr != KERN_SUCCESS {
                     return Err(format!(
-                        "Failed to get task port for Dolphin (pid {}). Error: {}. \
-                         You may need to run with sudo or grant accessibility permissions.",
+                        "macOS denied memory access to Dolphin (pid {}, error {}). The viewer needs \
+                         the com.apple.security.cs.debugger entitlement and the emulator needs \
+                         com.apple.security.get-task-allow. Run \
+                         OrcaInputViewer/scripts/macos-enable-dolphin-access.sh once, then restart Dolphin.",
                         process.pid, kr
                     ));
                 }
@@ -636,24 +648,44 @@ mod macos {
         }
 
         fn read_memory(&self, addr: mach_vm_address_t, buf: &mut [u8]) -> bool {
-            unsafe {
-                let mut size: mach_vm_size_t = 0;
-                let kr = mach_vm_read_overwrite(
-                    self.task,
-                    addr,
-                    buf.len() as mach_vm_size_t,
-                    buf.as_mut_ptr() as mach_vm_address_t,
-                    &mut size,
-                );
-                kr == KERN_SUCCESS && size == buf.len() as mach_vm_size_t
-            }
+            unsafe { read_raw(self.task, addr, buf) }
         }
     }
 
-    /// Find the 32MB GameCube RAM region in Dolphin's memory
+    /// Read `buf.len()` bytes of another process's memory, all-or-nothing.
+    unsafe fn read_raw(task: task_t, addr: mach_vm_address_t, buf: &mut [u8]) -> bool {
+        let mut size: mach_vm_size_t = 0;
+        let kr = mach_vm_read_overwrite(
+            task,
+            addr,
+            buf.len() as mach_vm_size_t,
+            buf.as_mut_ptr() as mach_vm_address_t,
+            &mut size,
+        );
+        kr == KERN_SUCCESS && size == buf.len() as mach_vm_size_t
+    }
+
+    /// Every GameCube disc header is copied to emulated 0x80000000 at boot, so the
+    /// start of the RAM mapping always reads back as the 8-character disc ID
+    /// ("GALE01" + maker code for Melee). macOS maps several unrelated 32MB
+    /// regions, so the header - not the size alone - identifies the real mapping.
+    unsafe fn has_disc_header(task: task_t, base: mach_vm_address_t) -> bool {
+        let mut id = [0u8; 8];
+        read_raw(task, base, &mut id)
+            && id
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'Z'))
+    }
+
+    /// Find the 32MB GameCube RAM mapping (MEM1 plus Dolphin's spare MEM2 window).
+    ///
+    /// A running game leaves its disc header at the start of the mapping, which is
+    /// what separates it from the other 32MB regions macOS also maps. Before a game
+    /// is loaded no region carries a header, so fall back to the first 32MB region.
     unsafe fn find_gc_ram_base(task: task_t) -> Option<mach_vm_address_t> {
         const GC_RAM_SIZE: mach_vm_size_t = 32 * 1024 * 1024; // 32MB
 
+        let mut first_size_match: Option<mach_vm_address_t> = None;
         let mut address: mach_vm_address_t = 0;
         let mut size: mach_vm_size_t = 0;
         let mut info: vm_region_basic_info_data_64_t = mem::zeroed();
@@ -676,16 +708,19 @@ mod macos {
                 break;
             }
 
-            // Look for a region of exactly 32MB that is readable and writable
-            // Dolphin's GC RAM is typically mapped as rw-
             if size == GC_RAM_SIZE {
-                return Some(address);
+                if has_disc_header(task, address) {
+                    return Some(address);
+                }
+                if first_size_match.is_none() {
+                    first_size_match = Some(address);
+                }
             }
 
             address += size;
         }
 
-        None
+        first_size_match
     }
 }
 

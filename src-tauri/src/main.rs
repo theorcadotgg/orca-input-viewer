@@ -15,6 +15,9 @@ use tungstenite::{accept, Message, WebSocket};
 
 mod dolphin;
 
+#[cfg(target_os = "macos")]
+mod macos_access;
+
 const ADAPTER_VID: u16 = 0x057e;
 const ADAPTER_PID: u16 = 0x0337;
 const ADAPTER_INTERFACE: u8 = 0;
@@ -972,6 +975,21 @@ fn get_app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// macOS only: re-sign the local Dolphin/Slippi bundle so this app may read its
+/// emulated RAM. macOS refuses task ports to unentitled callers, and notarized
+/// emulator builds do not carry the entitlement that allows it.
+#[tauri::command]
+fn enable_dolphin_debug_access() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_access::enable_dolphin_debug_access()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Dolphin memory access only needs fixing on macOS.".to_string())
+    }
+}
+
 fn map_tauri_err(err: tauri::Error) -> String {
     err.to_string()
 }
@@ -994,6 +1012,7 @@ fn main() {
             start_overlay_server,
             stop_overlay_server,
             get_app_version,
+            enable_dolphin_debug_access,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

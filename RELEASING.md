@@ -1,4 +1,4 @@
-# Orca Input Viewer — Signing + Auto-Updates (Windows)
+# Orca Input Viewer — Signing + Auto-Updates (Windows + macOS)
 
 This repo is set up to ship **signed** Windows installers and support **in-app auto-updates** via **GitHub Releases**.
 
@@ -122,3 +122,71 @@ Use GitHub Release notes (the workflow uses `generateReleaseNotes: true` by defa
 - Still seeing SmartScreen warnings
   - Standard certs may warn until reputation builds.
   - EV certs usually reduce friction significantly.
+
+## macOS
+
+The Windows CI workflow does not cover macOS. Everything below runs on a Mac.
+
+### Build
+
+```sh
+cd OrcaInputViewer
+cargo tauri build --bundles app      # or omit --bundles for .app + .dmg
+open "src-tauri/target/release/bundle/macos/Orca Input Viewer.app"
+```
+
+Requires Rust plus the Xcode command line tools. `rusb` builds libusb from source
+(the `vendored` feature), so Homebrew libusb is not needed and the bundle ships with
+no library dependencies outside `/usr/lib` and `/System/Library`.
+
+### Signing
+
+Local builds are ad-hoc signed (`bundle.macOS.signingIdentity: "-"`) with
+`src-tauri/entitlements.plist`, which grants `com.apple.security.cs.debugger`.
+That entitlement is what allows the viewer to call `task_for_pid()` and read the
+emulator's RAM — without it macOS returns `KERN_FAILURE (5)`.
+
+For a distributable build, override the identity and notarize:
+
+```sh
+export APPLE_SIGNING_IDENTITY="Developer ID Application: <Name> (<TEAMID>)"
+export APPLE_ID="you@example.com"
+export APPLE_PASSWORD="app-specific-password"
+export APPLE_TEAM_ID="<TEAMID>"
+cargo tauri build
+```
+
+Keep the debug entitlement in the shipped build: it is the only way Dolphin mode
+works on macOS. Note that macOS TCC records "App Management" permission per code
+identity — an ad-hoc signature changes on every build, so users must re-approve it
+after each update, while a Developer ID signature persists.
+
+### macOS prerequisites for Dolphin mode
+
+macOS only hands out task ports to entitled processes, so two things are needed:
+
+1. the viewer carries `com.apple.security.cs.debugger` (done by the build config), and
+2. the emulator bundle carries `com.apple.security.get-task-allow`.
+
+Notarized Dolphin/Slippi builds do not carry (2), so one of these:
+
+- In the app: press **Enable macOS Access**. It re-signs every Dolphin/Slippi install
+  it finds (the running one, the copies Slippi Launcher manages under
+  `~/Library/Application Support/Slippi Launcher/{netplay,netplay-beta,playback}`,
+  and `/Applications/Dolphin.app`), keeping the entitlements those builds rely on
+  (`com.apple.security.cs.allow-jit` is what makes Dolphin run on Apple Silicon) and
+  adding `get-task-allow` plus `disable-library-validation`. Restart Dolphin afterwards.
+- Or from a terminal: `scripts/macos-enable-dolphin-access.sh [path/to/Dolphin.app]`.
+
+Both need the modifying app to hold the **App Management** permission
+(System Settings → Privacy & Security → App Management). The app prompts for it on
+first use; a terminal needs to be enabled there manually. Slippi Launcher replaces
+its Dolphin on update, so re-run this after an update.
+
+### Auto-updates on macOS
+
+`bundle.createUpdaterArtifacts` is `false` and `plugins.updater.pubkey` is still a
+placeholder, so updates do not work yet on any platform. On macOS the updater
+additionally needs a signed `.app.tar.gz` (`createUpdaterArtifacts: true` plus
+`TAURI_SIGNING_PRIVATE_KEY`) and a valid code signature, so finish Windows signing
+first, then extend the release workflow for macOS.

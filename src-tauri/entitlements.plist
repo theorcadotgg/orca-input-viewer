@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- macOS refuses task_for_pid() to unentitled apps, which is what reading
+	     Dolphin's emulated RAM needs. The emulator bundle must additionally carry
+	     com.apple.security.get-task-allow; see
+	     scripts/macos-enable-dolphin-access.sh. -->
+	<key>com.apple.security.cs.debugger</key>
+	<true/>
+</dict>
+</plist>

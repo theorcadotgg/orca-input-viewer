@@ -20,6 +20,8 @@ const obsUrl = document.getElementById('obsUrl');
 const copyObs = document.getElementById('copyObs');
 const frameRate = document.getElementById('frameRate');
 const inputMode = document.getElementById('inputMode');
+const macAccessRow = document.getElementById('macAccessRow');
+const enableMacAccess = document.getElementById('enableMacAccess');
 const modeDolphin = document.getElementById('modeDolphin');
 const modeStandalone = document.getElementById('modeStandalone');
 const checkUpdatesBtn = document.getElementById('checkUpdates');
@@ -359,6 +361,21 @@ modeStandalone.addEventListener('click', () => {
   updateModeToggle();
 });
 
+// macOS: reading Dolphin's RAM needs the emulator signed with get-task-allow.
+enableMacAccess.addEventListener('click', async () => {
+  enableMacAccess.disabled = true;
+  loadHint.style.color = '';
+  loadHint.textContent = 'Signing Dolphin for macOS memory access...';
+  try {
+    loadHint.textContent = await tauriInvoke('enable_dolphin_debug_access');
+  } catch (err) {
+    loadHint.style.color = 'var(--danger)';
+    loadHint.textContent = `${err.message || err}`;
+  } finally {
+    enableMacAccess.disabled = false;
+  }
+});
+
 startStream.addEventListener('click', async () => {
   startStream.disabled = true;
   setAdapterStatus(false, true);
@@ -483,6 +500,10 @@ async function bootstrap() {
   updateProfileOptions();
   updateModeToggle(); // Initialize mode toggle state
   render();
+  // Dolphin's memory is only gated behind code signing on macOS.
+  if (navigator.userAgent.includes('Mac')) {
+    macAccessRow.classList.remove('hidden');
+  }
   await loadAppVersion();
 
   if (checkUpdatesBtn) {
