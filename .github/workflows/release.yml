@@ -48,6 +48,11 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-latest
+    # Secrets cannot be read from `if`, so expose them at job level to make the
+    # code-signing steps conditional.
+    env:
+      WINDOWS_CERT_PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_B64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -68,14 +73,9 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Import Windows code signing certificate
+        if: env.WINDOWS_CERT_PFX_B64 != ''
         shell: pwsh
-        env:
-          WINDOWS_CERT_PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_B64 }}
-          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
-          if (-not $env:WINDOWS_CERT_PFX_B64) { throw "Missing secret WINDOWS_CERT_PFX_B64" }
-          if (-not $env:WINDOWS_CERT_PASSWORD) { throw "Missing secret WINDOWS_CERT_PASSWORD" }
-
           $pfxPath = Join-Path $env:RUNNER_TEMP "orca-input-viewer-codesign.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_B64))
 
@@ -85,23 +85,30 @@ jobs:
 
           "WINDOWS_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Configure Tauri Windows signing
+      - name: Configure Tauri Windows artifacts
         shell: pwsh
         run: |
-          # WINDOWS_CERT_THUMBPRINT was written to GITHUB_ENV by the previous step.
-          if (-not $env:WINDOWS_CERT_THUMBPRINT) { throw "Missing env WINDOWS_CERT_THUMBPRINT" }
-
+          # Updater artifacts are signed with the Tauri updater key, not the Windows
+          # code-signing certificate, so they are produced either way.
           $configPath = "src-tauri/tauri.conf.json"
           $json = Get-Content $configPath -Raw | ConvertFrom-Json
           if (-not $json.bundle) { $json | Add-Member -NotePropertyName bundle -NotePropertyValue (@{}) }
           if (-not $json.bundle.windows) { $json.bundle | Add-Member -NotePropertyName windows -NotePropertyValue (@{}) }
 
-          $json.bundle.windows.certificateThumbprint = $env:WINDOWS_CERT_THUMBPRINT
+          $json.bundle.createUpdaterArtifacts = $true
           $json.bundle.windows.digestAlgorithm = "sha256"
           $json.bundle.windows.timestampUrl = "http://timestamp.digicert.com"
-          $json.bundle.createUpdaterArtifacts = $true
+          if ($env:WINDOWS_CERT_THUMBPRINT) {
+            $json.bundle.windows.certificateThumbprint = $env:WINDOWS_CERT_THUMBPRINT
+          }
 
           $json | ConvertTo-Json -Depth 64 | Set-Content -Path $configPath -Encoding utf8
+
+      - name: Warn about unsigned installers
+        if: env.WINDOWS_CERT_PFX_B64 == ''
+        shell: pwsh
+        run: |
+          Write-Host "::warning::WINDOWS_CERT_PFX_B64 is not set - publishing UNSIGNED Windows installers. SmartScreen will warn users until a code-signing certificate is added (see RELEASING.md)."
 
       - name: Build, sign & upload
         uses: tauri-apps/tauri-action@v0

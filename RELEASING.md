@@ -200,7 +200,7 @@ Secrets to add under **Settings → Secrets and variables → Actions**:
 
 | Secret | Platform | Value |
 | --- | --- | --- |
-| `WINDOWS_CERT_PFX_B64`, `WINDOWS_CERT_PASSWORD` | Windows | see the Windows sections above |
+| `WINDOWS_CERT_PFX_B64`, `WINDOWS_CERT_PASSWORD` | Windows | optional — installers ship unsigned (with a CI warning) until these are set |
 | `APPLE_CERTIFICATE` | macOS | base64 of the exported `Developer ID Application` `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | macOS | password chosen when exporting that `.p12` |
 | `KEYCHAIN_PASSWORD` | macOS | any random string; password of the throwaway CI keychain |
