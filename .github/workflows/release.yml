@@ -1,4 +1,4 @@
-name: Release (Windows)
+name: Release (Windows + macOS)
 
 on:
   push:
@@ -7,7 +7,44 @@ on:
   workflow_dispatch:
 
 jobs:
-  release:
+  # The release is created once, as a draft, so the platform jobs can upload to it
+  # concurrently and nothing is published until every platform finished. Tauri's
+  # updater endpoint (releases/latest) therefore only ever sees complete releases.
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.draft.outputs.result }}
+    steps:
+      - name: Create draft release for this ref
+        id: draft
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '').replace('refs/heads/', '');
+            const releases = await github.paginate(github.rest.repos.listReleases, { ...context.repo });
+            const existing = releases.find((release) => release.tag_name === tag);
+            if (existing) {
+              if (!existing.draft) {
+                core.setFailed(`Release ${tag} is already published.`);
+                return existing.id;
+              }
+              core.notice(`Reusing draft release ${tag}.`);
+              return existing.id;
+            }
+            const created = await github.rest.repos.createRelease({
+              ...context.repo,
+              tag_name: tag,
+              name: `Orca Input Viewer ${tag}`,
+              draft: true,
+              prerelease: false,
+              generate_release_notes: true,
+            });
+            return created.data.id;
+
+  windows:
+    needs: prepare
     permissions:
       contents: write
     runs-on: windows-latest
@@ -50,9 +87,8 @@ jobs:
 
       - name: Configure Tauri Windows signing
         shell: pwsh
-        env:
-          WINDOWS_CERT_THUMBPRINT: ${{ env.WINDOWS_CERT_THUMBPRINT }}
         run: |
+          # WINDOWS_CERT_THUMBPRINT was written to GITHUB_ENV by the previous step.
           if (-not $env:WINDOWS_CERT_THUMBPRINT) { throw "Missing env WINDOWS_CERT_THUMBPRINT" }
 
           $configPath = "src-tauri/tauri.conf.json"
@@ -67,7 +103,7 @@ jobs:
 
           $json | ConvertTo-Json -Depth 64 | Set-Content -Path $configPath -Encoding utf8
 
-      - name: Build & publish (GitHub Release + latest.json)
+      - name: Build, sign & upload
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -76,8 +112,132 @@ jobs:
         with:
           projectPath: "src-tauri"
           args: "--target x86_64-pc-windows-msvc"
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           tagName: ${{ github.ref_name }}
-          releaseName: "Orca Input Viewer ${{ github.ref_name }}"
-          generateReleaseNotes: true
+          releaseDraft: true
           prerelease: false
           updaterJsonPreferNsis: true
+
+  macos:
+    needs: prepare
+    permissions:
+      contents: write
+    runs-on: macos-latest
+
+    env:
+      # Update if the certificate is renewed; `security find-identity -v -p codesigning` prints it.
+      APPLE_SIGNING_IDENTITY: "Developer ID Application: Max Putterman (9987498A4X)"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate updater pubkey configured
+        run: |
+          set -euo pipefail
+          pubkey=$(jq -r '.plugins.updater.pubkey // ""' src-tauri/tauri.conf.json)
+          if [ -z "$pubkey" ] || [[ "$pubkey" == REPLACE_ME* ]]; then
+            echo "Replace plugins.updater.pubkey in tauri.conf.json before releasing." >&2
+            exit 1
+          fi
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Validate release signing secrets
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Without these Tauri skips notarization and Gatekeeper blocks the DMG for end
+          # users. Delete this step and the APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID env of
+          # the build step if you deliberately ship a signed-but-not-notarized build.
+          for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing secret $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Import Apple Developer certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "${APPLE_CERTIFICATE:-}" ] || { echo "Missing secret APPLE_CERTIFICATE (base64 .p12 of the Developer ID certificate)." >&2; exit 1; }
+          [ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ] || { echo "Missing secret APPLE_CERTIFICATE_PASSWORD." >&2; exit 1; }
+          [ -n "${KEYCHAIN_PASSWORD:-}" ] || { echo "Missing secret KEYCHAIN_PASSWORD." >&2; exit 1; }
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain >/dev/null
+          rm -f certificate.p12
+
+          if ! security find-identity -v -p codesigning build.keychain | grep -q "$APPLE_SIGNING_IDENTITY"; then
+            echo "Certificate '$APPLE_SIGNING_IDENTITY' not found in the imported keychain." >&2
+            security find-identity -v -p codesigning build.keychain >&2
+            exit 1
+          fi
+
+      - name: Configure Tauri macOS signing
+        run: |
+          set -euo pipefail
+          # bundle.macOS.signingIdentity in the repo is "-" (ad-hoc) so local builds get
+          # the entitlement; releases sign with the Developer ID identity above.
+          jq --arg identity "$APPLE_SIGNING_IDENTITY" \
+            '.bundle.macOS.signingIdentity = $identity | .bundle.createUpdaterArtifacts = true' \
+            src-tauri/tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp src-tauri/tauri.conf.json
+
+      - name: Build, sign, notarize & upload
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: "src-tauri"
+          args: "--target aarch64-apple-darwin"
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+
+  publish:
+    needs: [windows, macos]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the draft release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '').replace('refs/heads/', '');
+            const releases = await github.paginate(github.rest.repos.listReleases, { ...context.repo });
+            const release = releases.find((candidate) => candidate.tag_name === tag);
+            if (!release) {
+              core.setFailed(`No release found for ${tag}.`);
+              return;
+            }
+            const published = await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: release.id,
+              draft: false,
+              prerelease: false,
+              generate_release_notes: true,
+            });
+            core.notice(`Published ${published.data.html_url}`);

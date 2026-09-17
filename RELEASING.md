@@ -139,6 +139,8 @@ Requires Rust plus the Xcode command line tools. `rusb` builds libusb from sourc
 (the `vendored` feature), so Homebrew libusb is not needed and the bundle ships with
 no library dependencies outside `/usr/lib` and `/System/Library`.
 
+macOS builds are Apple Silicon only (`aarch64-apple-darwin`); there is no Intel build.
+
 ### Signing
 
 Local builds are ad-hoc signed (`bundle.macOS.signingIdentity: "-"`) with
@@ -183,10 +185,50 @@ Both need the modifying app to hold the **App Management** permission
 first use; a terminal needs to be enabled there manually. Slippi Launcher replaces
 its Dolphin on update, so re-run this after an update.
 
-### Auto-updates on macOS
+### CI (Windows + macOS)
 
-`bundle.createUpdaterArtifacts` is `false` and `plugins.updater.pubkey` is still a
-placeholder, so updates do not work yet on any platform. On macOS the updater
-additionally needs a signed `.app.tar.gz` (`createUpdaterArtifacts: true` plus
-`TAURI_SIGNING_PRIVATE_KEY`) and a valid code signature, so finish Windows signing
-first, then extend the release workflow for macOS.
+`.github/workflows/release.yml` runs on `v*` tags (or manually):
+
+1. `prepare` creates a **draft** GitHub release for the tag.
+2. `windows` and `macos` build, sign and upload into that draft (macOS is
+   `aarch64-apple-darwin`, Developer ID signed and notarized). Tauri Action merges each
+   job's entry into one `latest.json`.
+3. `publish` publishes the draft, so `releases/latest` — the updater endpoint — only ever
+   points at a complete release.
+
+Secrets to add under **Settings → Secrets and variables → Actions**:
+
+| Secret | Platform | Value |
+| --- | --- | --- |
+| `WINDOWS_CERT_PFX_B64`, `WINDOWS_CERT_PASSWORD` | Windows | see the Windows sections above |
+| `APPLE_CERTIFICATE` | macOS | base64 of the exported `Developer ID Application` `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | macOS | password chosen when exporting that `.p12` |
+| `KEYCHAIN_PASSWORD` | macOS | any random string; password of the throwaway CI keychain |
+| `APPLE_ID` | macOS | Apple ID email |
+| `APPLE_PASSWORD` | macOS | **app-specific** password from appleid.apple.com, not the account password |
+| `APPLE_TEAM_ID` | macOS | team ID (`9987498A4X`) |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | both | updater signing key |
+
+Exporting the certificate for `APPLE_CERTIFICATE`: Keychain Access → *My Certificates* →
+expand “Developer ID Application: …” → right-click the key → *Export* → save as
+`certificate.p12` with a password, then
+
+```sh
+openssl base64 -A -in certificate.p12 -out certificate-base64.txt
+```
+
+and paste the contents of that file into the secret.
+
+The macOS job signs with the identity hard-coded in the workflow (update it if the
+certificate is renewed) and notarizes whenever `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`
+are present. Release builds keep `entitlements.plist`, because the
+`com.apple.security.cs.debugger` entitlement is what makes Dolphin mode work. If Apple's
+notary ever rejects that entitlement, remove the three notarization secrets from the macOS
+job — the DMG is then signed but not notarized.
+
+### Auto-updates
+
+`plugins.updater.pubkey` is still a placeholder, and both platform jobs refuse to release
+while it is — replace it with the public key from `cargo tauri signer generate` (see above),
+then the workflow produces the updater artifacts (`latest.json` plus `.app.tar.gz`/installer
+signatures) and the in-app updater starts working.
