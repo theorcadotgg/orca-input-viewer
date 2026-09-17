@@ -301,7 +301,6 @@ export function buildDiagram(svg) {
       <g class="node" data-type="analog" data-index="${idx}">
         <path class="oblong-node" d="${oblong.path}" />
         <text class="node-label" x="${oblong.cx}" y="${oblong.cy}" text-anchor="middle"></text>
-        <text class="node-value" x="${oblong.cx}" y="${oblong.cy + 10}" text-anchor="middle"></text>
       </g>`);
   });
 
@@ -310,7 +309,6 @@ export function buildDiagram(svg) {
       <g class="node" data-type="digital" data-index="${idx}">
         <circle class="circle-node" cx="${circle.cx}" cy="${circle.cy}" r="${circle.r}" />
         <text class="node-label" x="${circle.cx}" y="${circle.cy + 3}" text-anchor="middle"></text>
-        <text class="node-value" x="${circle.cx}" y="${circle.cy + 12}" text-anchor="middle"></text>
       </g>`);
   });
 
@@ -438,8 +436,7 @@ export function applyState(svg, state) {
       const srcId = circleIndexToSource(index);
       const active = state.digitalActiveBySrc[srcId];
       const label = state.digitalLabelBySrc[srcId] ?? '';
-      const value = state.digitalValueBySrc[srcId] ?? 0;
-      updateNode(node, active ? 1 : 0, label, value, null);
+      updateNode(node, active ? 1 : 0, label, null);
     }
 
     if (type === 'analog') {
@@ -447,12 +444,12 @@ export function applyState(svg, state) {
       const value = state.analogValueBySrc[srcId] ?? 0;
       const label = state.analogLabelBySrc[srcId] ?? '';
       const thresholds = analogThresholds(srcId, state.triggerPolicy);
-      updateNode(node, value, label, value, thresholds);
+      updateNode(node, value, label, thresholds);
     }
   });
 }
 
-function updateNode(node, intensity, label, value, thresholds) {
+function updateNode(node, intensity, label, thresholds) {
   node.classList.remove('node-light', 'node-mid', 'node-full');
 
   if (thresholds) {
@@ -464,11 +461,6 @@ function updateNode(node, intensity, label, value, thresholds) {
 
   const labelEl = node.querySelector('.node-label');
   if (labelEl) labelEl.textContent = label;
-
-  const valueEl = node.querySelector('.node-value');
-  if (valueEl) {
-    valueEl.textContent = intensity > 0 ? value.toFixed(2) : '';
-  }
 }
 
 function intensityLevel(value, light, mid, full) {

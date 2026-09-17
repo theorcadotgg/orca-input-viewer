@@ -504,13 +504,6 @@ body.overlay {
   font-family: var(--font);
 }
 
-.node-value {
-  font-size: 7px;
-  fill: var(--text-muted);
-  pointer-events: none;
-  font-family: monospace;
-}
-
 .node-light .circle-node,
 .node-light .oblong-node {
   fill: var(--press-light);
