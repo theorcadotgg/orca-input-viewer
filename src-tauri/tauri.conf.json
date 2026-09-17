@@ -45,7 +45,7 @@
         "label": "main",
         "title": "Orca Input Viewer",
         "width": 900,
-        "height": 600,
+        "height": 700,
         "minWidth": 700,
         "minHeight": 450,
         "resizable": true,

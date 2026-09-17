@@ -9,84 +9,90 @@
   <body>
     <div class="app">
       <aside class="sidebar">
-        <header class="sidebar-header">
-          <h1>Orca Input Viewer</h1>
-          <div class="status-badges">
-            <span class="status-dot" id="adapterDot"></span>
-            <span class="status-label" id="adapterStatus">Offline</span>
-            <span class="status-dot config" id="configDot"></span>
-            <span class="status-label" id="configStatus">Default</span>
-            <span class="input-mode" id="inputMode"></span>
+        <header class="app-header">
+          <div class="app-title">
+            <h1>Orca Input Viewer</h1>
+            <span class="app-version" id="appVersion"></span>
+          </div>
+          <div class="status-row">
+            <span class="status-chip" id="adapterChip" data-state="offline" title="Adapter not connected">
+              <span class="status-dot" id="adapterDot"></span>
+              <span id="adapterStatus">Offline</span>
+            </span>
+            <span class="status-chip" id="configChip" data-state="default" title="Using built-in default mappings">
+              <span class="status-dot" id="configDot"></span>
+              <span id="configStatus">Default mappings</span>
+            </span>
+            <span class="status-chip mode hidden" id="inputMode"></span>
           </div>
         </header>
 
-        <section class="sidebar-section">
-          <div class="section-row">
-            <div class="inline-control">
-              <label for="portSelect">Port</label>
-              <select class="select-compact" id="portSelect"></select>
-            </div>
-            <div class="inline-control">
-              <label for="profileSelect">Profile</label>
-              <select class="select-compact" id="profileSelect"></select>
-            </div>
-          </div>
-          <div class="inline-control" style="margin-bottom: 10px;">
-            <label>Input Mode</label>
-            <div class="toggle-group">
-              <button class="toggle-btn" id="modeDolphin" data-mode="dolphin">Dolphin</button>
-              <button class="toggle-btn" id="modeStandalone" data-mode="usb">Standalone</button>
-            </div>
-          </div>
-          <div class="button-row">
-            <button class="btn primary" id="startStream">Start Stream</button>
-            <button class="btn" id="stopStream">Stop</button>
-          </div>
-          <div class="button-row hidden" id="macAccessRow">
-            <button class="btn" id="enableMacAccess" type="button">Enable macOS Access</button>
-          </div>
-        </section>
+        <div class="sidebar-body">
+          <section class="panel">
+            <h2 class="panel-title">Connection</h2>
 
-        <section class="sidebar-section collapsible" data-section="config">
-          <button class="section-toggle" type="button">
-            <span>Config</span>
-            <svg class="chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
-          </button>
-          <div class="section-content">
-            <button class="btn accent" id="loadConfig">Load Device Config</button>
-            <p class="hint" id="loadHint">Put Orca into config mode to sync mappings.</p>
-          </div>
-        </section>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Port</span>
+                <select class="select" id="portSelect"></select>
+              </label>
+              <label class="field">
+                <span class="field-label">Profile</span>
+                <select class="select" id="profileSelect"></select>
+              </label>
+            </div>
 
-        <section class="sidebar-section collapsible" data-section="overlay">
-          <button class="section-toggle" type="button">
-            <span>Overlay & OBS</span>
-            <svg class="chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
-          </button>
-          <div class="section-content">
-            <div class="button-row">
-              <button class="btn" id="showOverlay">Show Overlay</button>
-              <button class="btn ghost" id="hideOverlay">Hide</button>
+            <div class="field">
+              <span class="field-label" id="inputModeLabel">Input mode</span>
+              <div class="segmented" role="group" aria-labelledby="inputModeLabel">
+                <button class="seg-btn" id="modeDolphin" data-mode="dolphin" type="button" aria-pressed="true">Dolphin</button>
+                <button class="seg-btn" id="modeStandalone" data-mode="usb" type="button" aria-pressed="false">Standalone</button>
+              </div>
             </div>
-            <div class="obs-row">
-              <button class="btn" id="startObs">OBS Server</button>
-              <button class="btn ghost" id="stopObs">Stop</button>
-            </div>
-            <div class="url-row">
-              <input class="url-input" id="obsUrl" type="text" readonly value="" placeholder="Server URL..." />
-              <button class="btn icon" id="copyObs" title="Copy URL">
-                <svg width="14" height="14" viewBox="0 0 14 14"><rect x="4" y="4" width="8" height="8" rx="1" stroke="currentColor" fill="none"/><path d="M2 10V2h8" stroke="currentColor" fill="none"/></svg>
-              </button>
-            </div>
-          </div>
-        </section>
 
-        <footer class="sidebar-footer">
-          <div class="footer-row">
-            <span class="frame-rate" id="frameRate">Idle</span>
-            <button class="link-btn" id="checkUpdates" type="button">Check updates</button>
-          </div>
-          <span class="app-version" id="appVersion"></span>
+            <button class="btn primary block" id="streamButton" type="button">Start Stream</button>
+            <p class="notice hidden" id="connectionNotice" role="status" aria-live="polite"></p>
+            <button class="btn block hidden" id="enableMacAccess" type="button">Enable macOS Access</button>
+          </section>
+
+          <section class="panel">
+            <h2 class="panel-title">Device config</h2>
+            <button class="btn block" id="loadConfig" type="button">Load Device Config</button>
+            <p class="notice" id="configNotice" role="status" aria-live="polite">Put Orca in config mode to sync.</p>
+          </section>
+
+          <section class="panel">
+            <h2 class="panel-title">Outputs</h2>
+
+            <div class="group">
+              <span class="field-label">Overlay window</span>
+              <div class="button-pair">
+                <button class="btn" id="showOverlay" type="button">Show</button>
+                <button class="btn" id="hideOverlay" type="button">Hide</button>
+              </div>
+            </div>
+
+            <div class="group">
+              <span class="field-label">OBS browser source</span>
+              <div class="button-pair">
+                <button class="btn" id="startObs" type="button">Start server</button>
+                <button class="btn" id="stopObs" type="button">Stop</button>
+              </div>
+              <div class="url-row hidden" id="obsUrlRow">
+                <input class="url-input" id="obsUrl" type="text" readonly value="" placeholder="Server URL" />
+                <button class="btn icon" id="copyObs" type="button" title="Copy URL" aria-label="Copy URL">
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" fill="none"/><path d="M2.5 10V2.5H10" stroke="currentColor" fill="none"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <p class="notice hidden" id="outputsNotice" role="status" aria-live="polite"></p>
+          </section>
+        </div>
+
+        <footer class="app-footer">
+          <span class="frame-rate" id="frameRate">-- fps</span>
+          <button class="link-btn" id="checkUpdates" type="button" title="Check for updates">Check updates</button>
         </footer>
       </aside>
 

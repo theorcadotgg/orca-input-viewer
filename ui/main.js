@@ -2,25 +2,26 @@ import { applyState, buildDiagram, computeViewerState, decodeConfig, makePortOpt
 
 // DOM Elements
 const svg = document.getElementById('orcaDiagram');
-const adapterDot = document.getElementById('adapterDot');
+const adapterChip = document.getElementById('adapterChip');
 const adapterStatus = document.getElementById('adapterStatus');
-const configDot = document.getElementById('configDot');
+const configChip = document.getElementById('configChip');
 const configStatus = document.getElementById('configStatus');
 const portSelect = document.getElementById('portSelect');
 const profileSelect = document.getElementById('profileSelect');
-const startStream = document.getElementById('startStream');
-const stopStream = document.getElementById('stopStream');
+const streamButton = document.getElementById('streamButton');
+const connectionNotice = document.getElementById('connectionNotice');
+const configNotice = document.getElementById('configNotice');
+const outputsNotice = document.getElementById('outputsNotice');
 const loadConfigBtn = document.getElementById('loadConfig');
-const loadHint = document.getElementById('loadHint');
 const showOverlay = document.getElementById('showOverlay');
 const hideOverlay = document.getElementById('hideOverlay');
 const startObs = document.getElementById('startObs');
 const stopObs = document.getElementById('stopObs');
+const obsUrlRow = document.getElementById('obsUrlRow');
 const obsUrl = document.getElementById('obsUrl');
 const copyObs = document.getElementById('copyObs');
 const frameRate = document.getElementById('frameRate');
 const inputMode = document.getElementById('inputMode');
-const macAccessRow = document.getElementById('macAccessRow');
 const enableMacAccess = document.getElementById('enableMacAccess');
 const modeDolphin = document.getElementById('modeDolphin');
 const modeStandalone = document.getElementById('modeStandalone');
@@ -210,6 +211,14 @@ async function downloadAndInstallUpdate() {
 }
 
 // UI Update Functions
+function setNotice(el, text, tone = 'muted') {
+  if (!el) return;
+  el.textContent = text || '';
+  if (tone !== 'muted') el.dataset.tone = tone;
+  else delete el.dataset.tone;
+  el.classList.toggle('hidden', !text);
+}
+
 function updateProfileOptions() {
   profileSelect.innerHTML = '';
   config.profileLabels.forEach((label, idx) => {
@@ -233,40 +242,36 @@ function updatePortOptions() {
   setPortSelectAutoState(isAutoPortActive);
 }
 
+const ADAPTER_STATUS = {
+  offline: { label: 'Offline', title: 'Adapter not connected - start a stream to connect' },
+  waiting: { label: 'Waiting', title: 'Streaming - waiting for input reports' },
+  connected: { label: 'Connected', title: 'Adapter detected - stream stopped' },
+  live: { label: 'Live', title: 'Receiving input reports' },
+};
+
 function setAdapterStatus(connected, streaming = false) {
-  if (connected) {
-    adapterDot.classList.add('active');
-    adapterStatus.textContent = streaming ? 'Live' : 'Connected';
-  } else {
-    adapterDot.classList.remove('active');
-    adapterStatus.textContent = streaming ? 'Waiting...' : 'Offline';
-  }
+  const state = connected ? (streaming ? 'live' : 'connected') : streaming ? 'waiting' : 'offline';
+  adapterChip.dataset.state = state;
+  adapterChip.title = ADAPTER_STATUS[state].title;
+  adapterStatus.textContent = ADAPTER_STATUS[state].label;
 }
 
 function setConfigStatus(loaded) {
-  if (loaded) {
-    configDot.classList.add('active');
-    configStatus.textContent = 'Loaded';
-  } else {
-    configDot.classList.remove('active');
-    configStatus.textContent = 'Default';
-  }
+  configChip.dataset.state = loaded ? 'loaded' : 'default';
+  configChip.title = loaded ? 'Mappings loaded from device' : 'Using built-in default mappings';
+  configStatus.textContent = loaded ? 'Device mappings' : 'Default mappings';
 }
 
 function setInputMode(mode, processName) {
-  inputMode.classList.remove('usb', 'dolphin');
-  if (mode === 'dolphin') {
-    inputMode.classList.add('dolphin');
-    inputMode.textContent = processName ? `Dolphin` : 'Dolphin';
-    inputMode.title = processName ? `Reading from ${processName}` : 'Reading from Dolphin memory';
-  } else if (mode === 'usb') {
-    inputMode.classList.add('usb');
-    inputMode.textContent = 'USB';
-    inputMode.title = 'Reading directly from USB adapter';
-  } else {
-    inputMode.textContent = '';
+  const label = mode === 'usb' ? 'USB adapter' : mode === 'dolphin' ? processName || '' : '';
+  inputMode.classList.toggle('hidden', !label);
+  inputMode.textContent = label;
+  if (!label) {
     inputMode.title = '';
+    return;
   }
+  inputMode.dataset.state = mode === 'dolphin' ? 'dolphin' : 'usb';
+  inputMode.title = mode === 'dolphin' ? `Reading from ${processName}` : 'Reading directly from USB adapter';
 }
 
 function resolveAutoPort(report) {
@@ -301,7 +306,7 @@ function render() {
       frameRate.textContent = `${frameCount} fps`;
       frameRate.classList.add('active');
     } else {
-      frameRate.textContent = 'Idle';
+      frameRate.textContent = '-- fps';
       frameRate.classList.remove('active');
     }
     frameCount = 0;
@@ -318,17 +323,11 @@ function onInputReport(report) {
     portSelect.value = String(selectedPort);
   }
   setPortSelectAutoState(isAutoPortActive);
+  // Drop the "waiting for inputs" hint once any port reports data.
+  if (connectionNotice.dataset.tone === 'info' && report?.ports?.some((p) => p.connected)) {
+    setNotice(connectionNotice, '');
+  }
   render();
-}
-
-// Collapsible Section Toggle
-function initCollapsibleSections() {
-  document.querySelectorAll('.collapsible .section-toggle').forEach((toggle) => {
-    toggle.addEventListener('click', () => {
-      const section = toggle.closest('.collapsible');
-      section.classList.toggle('collapsed');
-    });
-  });
 }
 
 // Event Handlers
@@ -347,8 +346,11 @@ profileSelect.addEventListener('change', (e) => {
 
 // Input Mode Toggle
 function updateModeToggle() {
-  modeDolphin.classList.toggle('active', selectedInputMode === 'dolphin');
-  modeStandalone.classList.toggle('active', selectedInputMode === 'usb');
+  const dolphin = selectedInputMode === 'dolphin';
+  modeDolphin.classList.toggle('active', dolphin);
+  modeStandalone.classList.toggle('active', !dolphin);
+  modeDolphin.setAttribute('aria-pressed', String(dolphin));
+  modeStandalone.setAttribute('aria-pressed', String(!dolphin));
 }
 
 modeDolphin.addEventListener('click', () => {
@@ -361,74 +363,91 @@ modeStandalone.addEventListener('click', () => {
   updateModeToggle();
 });
 
+// The backend reads the input mode when the stream starts, so lock it while streaming.
+function setModeLocked(locked) {
+  [modeDolphin, modeStandalone].forEach((btn) => {
+    btn.disabled = locked;
+    btn.title = locked ? 'Stop the stream to change input mode' : '';
+  });
+}
+
+function setStreamUI(streaming) {
+  isStreaming = streaming;
+  streamButton.classList.toggle('live', streaming);
+  streamButton.classList.toggle('primary', !streaming);
+  streamButton.textContent = streaming ? 'Stop Stream' : 'Start Stream';
+  setModeLocked(streaming);
+}
+
+async function startStream() {
+  streamButton.disabled = true;
+  streamButton.classList.remove('primary');
+  streamButton.textContent = 'Starting...';
+  setAdapterStatus(false, true);
+
+  try {
+    await tauriInvoke('start_adapter_stream', { mode: selectedInputMode });
+    setStreamUI(true);
+    setNotice(
+      connectionNotice,
+      selectedInputMode === 'dolphin'
+        ? 'Waiting for Dolphin/Slippi to report inputs.'
+        : 'Waiting for adapter to report inputs.',
+      'info'
+    );
+  } catch (err) {
+    console.error('Failed to start stream:', err);
+    setAdapterStatus(false, false);
+    setNotice(connectionNotice, `Stream error: ${err.message || err}`, 'error');
+    setStreamUI(false);
+  } finally {
+    streamButton.disabled = false;
+  }
+}
+
+async function stopStream() {
+  streamButton.disabled = true;
+  try {
+    await tauriInvoke('stop_adapter_stream');
+    setStreamUI(false);
+    setAdapterStatus(false, false);
+    setInputMode(null);
+    setNotice(connectionNotice, '');
+    frameRate.textContent = '-- fps';
+    frameRate.classList.remove('active');
+  } catch (err) {
+    console.error('Failed to stop stream:', err);
+    setNotice(connectionNotice, `Stop error: ${err.message || err}`, 'error');
+  } finally {
+    streamButton.disabled = false;
+  }
+}
+
+streamButton.addEventListener('click', () => void (isStreaming ? stopStream() : startStream()));
+
 // macOS: reading Dolphin's RAM needs the emulator signed with get-task-allow.
 enableMacAccess.addEventListener('click', async () => {
   enableMacAccess.disabled = true;
-  loadHint.style.color = '';
-  loadHint.textContent = 'Signing Dolphin for macOS memory access...';
+  setNotice(connectionNotice, 'Signing Dolphin for macOS memory access...', 'info');
   try {
-    loadHint.textContent = await tauriInvoke('enable_dolphin_debug_access');
+    setNotice(connectionNotice, await tauriInvoke('enable_dolphin_debug_access'), 'success');
   } catch (err) {
-    loadHint.style.color = 'var(--danger)';
-    loadHint.textContent = `${err.message || err}`;
+    setNotice(connectionNotice, `${err.message || err}`, 'error');
   } finally {
     enableMacAccess.disabled = false;
   }
 });
 
-startStream.addEventListener('click', async () => {
-  startStream.disabled = true;
-  setAdapterStatus(false, true);
-
-  if (selectedInputMode === 'dolphin') {
-    loadHint.textContent = 'Waiting for Dolphin/Slippi...';
-    loadHint.style.color = '';
-  }
-
-  try {
-    await tauriInvoke('start_adapter_stream', { mode: selectedInputMode });
-    isStreaming = true;
-    startStream.textContent = 'Streaming...';
-  } catch (err) {
-    console.error('Failed to start stream:', err);
-    setAdapterStatus(false, false);
-    // Show error in hint
-    loadHint.textContent = `Stream error: ${err.message || err}`;
-    loadHint.style.color = 'var(--danger)';
-  } finally {
-    startStream.disabled = false;
-  }
-});
-
-stopStream.addEventListener('click', async () => {
-  stopStream.disabled = true;
-  try {
-    await tauriInvoke('stop_adapter_stream');
-    isStreaming = false;
-    startStream.textContent = 'Start Stream';
-    setAdapterStatus(false, false);
-    setInputMode(null);
-    frameRate.textContent = 'Idle';
-    frameRate.classList.remove('active');
-  } catch (err) {
-    console.error('Failed to stop stream:', err);
-  } finally {
-    stopStream.disabled = false;
-  }
-});
-
 loadConfigBtn.addEventListener('click', async () => {
   loadConfigBtn.disabled = true;
-  loadHint.textContent = 'Waiting for Orca config mode...';
-  loadHint.style.color = '';
+  setNotice(configNotice, 'Waiting for Orca config mode...', 'info');
 
   try {
     const res = await tauriInvoke('load_config');
     const blobBase64 = res.blob_base64 || res.blobBase64;
     config = decodeConfig(blobBase64);
     setConfigStatus(true);
-    loadHint.textContent = 'Config loaded. Device rebooted to normal mode.';
-    loadHint.style.color = 'var(--success)';
+    setNotice(configNotice, 'Config loaded. Device rebooted to normal mode.', 'success');
     selectedProfile = config.activeProfile ?? 0;
     updateProfileOptions();
     render();
@@ -438,8 +457,7 @@ loadConfigBtn.addEventListener('click', async () => {
   } catch (err) {
     console.error('Config load failed:', err);
     setConfigStatus(false);
-    loadHint.textContent = `Failed: ${err.message || err}`;
-    loadHint.style.color = 'var(--danger)';
+    setNotice(configNotice, `Failed: ${err.message || err}`, 'error');
   } finally {
     loadConfigBtn.disabled = false;
   }
@@ -448,34 +466,50 @@ loadConfigBtn.addEventListener('click', async () => {
 showOverlay.addEventListener('click', async () => {
   try {
     await tauriInvoke('show_overlay_window');
+    setNotice(outputsNotice, '');
   } catch (err) {
     console.error('Failed to show overlay:', err);
+    setNotice(outputsNotice, `Could not show overlay: ${err.message || err}`, 'error');
   }
 });
 
 hideOverlay.addEventListener('click', async () => {
   try {
     await tauriInvoke('hide_overlay_window');
+    setNotice(outputsNotice, '');
   } catch (err) {
     console.error('Failed to hide overlay:', err);
+    setNotice(outputsNotice, `Could not hide overlay: ${err.message || err}`, 'error');
   }
 });
 
 startObs.addEventListener('click', async () => {
+  startObs.disabled = true;
   try {
     const res = await tauriInvoke('start_overlay_server');
     obsUrl.value = res.url || '';
+    obsUrlRow.classList.toggle('hidden', !obsUrl.value);
+    setNotice(outputsNotice, '');
   } catch (err) {
     console.error('Failed to start OBS server:', err);
+    setNotice(outputsNotice, `Could not start OBS server: ${err.message || err}`, 'error');
+  } finally {
+    startObs.disabled = false;
   }
 });
 
 stopObs.addEventListener('click', async () => {
+  stopObs.disabled = true;
   try {
     await tauriInvoke('stop_overlay_server');
     obsUrl.value = '';
+    obsUrlRow.classList.add('hidden');
+    setNotice(outputsNotice, '');
   } catch (err) {
     console.error('Failed to stop OBS server:', err);
+    setNotice(outputsNotice, `Could not stop OBS server: ${err.message || err}`, 'error');
+  } finally {
+    stopObs.disabled = false;
   }
 });
 
@@ -490,19 +524,19 @@ copyObs.addEventListener('click', async () => {
     }, 1500);
   } catch (err) {
     console.error('Failed to copy:', err);
+    setNotice(outputsNotice, 'Could not copy the URL.', 'error');
   }
 });
 
 // Bootstrap
 async function bootstrap() {
-  initCollapsibleSections();
   updatePortOptions();
   updateProfileOptions();
   updateModeToggle(); // Initialize mode toggle state
   render();
   // Dolphin's memory is only gated behind code signing on macOS.
   if (navigator.userAgent.includes('Mac')) {
-    macAccessRow.classList.remove('hidden');
+    enableMacAccess.classList.remove('hidden');
   }
   await loadAppVersion();
 
@@ -521,12 +555,10 @@ async function bootstrap() {
   // Listen for adapter errors
   await tauriListen('adapter_error', (event) => {
     console.error('Adapter error:', event.payload);
+    setStreamUI(false);
     setAdapterStatus(false, false);
     setInputMode(null);
-    isStreaming = false;
-    startStream.textContent = 'Start Stream';
-    loadHint.textContent = `Adapter error: ${event.payload}`;
-    loadHint.style.color = 'var(--danger)';
+    setNotice(connectionNotice, `Adapter error: ${event.payload}`, 'error');
   });
 
   // Listen for input mode changes
