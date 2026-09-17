@@ -56,6 +56,88 @@ pub fn find_dolphin_process() -> Option<DolphinProcess> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Which port is the local player on?
+// ---------------------------------------------------------------------------
+//
+// Slippi online does not leave the local player on a fixed port, so guessing
+// (or defaulting to port 0) shows the opponent's inputs whenever the match
+// assigned the local player to another port. Slippi's own game-side code keeps
+// the answer in emulated RAM; the addresses below are Melee NTSC 1.02, matching
+// project-slippi/slippi-ssbm-asm (`Online/Online.s`, `Online/Core/InitOnlinePlay.asm`).
+
+/// Scene ID. Slippi's `getMinorMajor` macro reads the u32 at 0x80479D30 and
+/// keeps the low 16 bits as `(minor << 8) | major`.
+const SCENE_MAJOR_ADDR: u32 = 0x8047_9D30;
+const SCENE_MINOR_ADDR: u32 = 0x8047_9D33;
+
+const SCENE_ONLINE: u8 = 0x08;
+const SCENE_ONLINE_CSS: u8 = 0x00;
+const SCENE_ONLINE_SSS: u8 = 0x01;
+const SCENE_ONLINE_IN_GAME: u8 = 0x02;
+// Minor 0x03 (results), 0x04 (splash) and 0x05 (game setup) carry no usable
+// local port, so those scenes leave the manual port selection alone.
+
+/// Merged into the scene table, this is `-0x5108(r13)` with r13 = 0x804DB6A0:
+/// the port the local player is using during the online menus, which Slippi
+/// reads to find the local player's cursor on the CSS.
+const ONLINE_MENU_LOCAL_PORT_ADDR: u32 = 0x804D_6598;
+
+/// `-0x49E4(r13)`: pointer to the online data buffer, allocated when an online
+/// match starts and preserved across rollback savestates. Its first two bytes
+/// are the ports the local player and the opponent were assigned.
+const ONLINE_DATA_BUF_PTR_ADDR: u32 = 0x804D_6CBC;
+const ONLINE_DATA_BUF_LOCAL_PORT: u32 = 0x00;
+const ONLINE_DATA_BUF_OPPONENT_PORT: u32 = 0x01;
+
+/// Emulated RAM is the first 24MB of the GameCube address space, and Slippi's
+/// buffers are heap allocated inside it.
+fn gc_ram_ptr(ptr: u32) -> Option<u32> {
+    (0x8000_0000..0x8180_0000).contains(&ptr).then_some(ptr)
+}
+
+/// Port the local player's controller is plugged into, or `None` when the
+/// current scene says nothing about it (offline play, replays, menus without a
+/// match) - the caller then falls back to the port the user picked.
+fn detect_slippi_local_port<M: EmuRam>(ram: &M) -> Option<u8> {
+    if ram.read_u8_emu(SCENE_MAJOR_ADDR)? != SCENE_ONLINE {
+        return None;
+    }
+
+    match ram.read_u8_emu(SCENE_MINOR_ADDR)? {
+        SCENE_ONLINE_CSS | SCENE_ONLINE_SSS => ram
+            .read_u8_emu(ONLINE_MENU_LOCAL_PORT_ADDR)
+            .filter(|port| *port <= 3),
+        SCENE_ONLINE_IN_GAME => {
+            let buf = gc_ram_ptr(ram.read_u32_be_emu(ONLINE_DATA_BUF_PTR_ADDR)?)?;
+            let local = ram.read_u8_emu(buf + ONLINE_DATA_BUF_LOCAL_PORT)?;
+            let opponent = ram.read_u8_emu(buf + ONLINE_DATA_BUF_OPPONENT_PORT)?;
+            // A match always has two players on two different ports; anything
+            // else means the buffer is not this game's and is not trustworthy.
+            (local <= 3 && opponent <= 3 && local != opponent).then_some(local)
+        }
+        _ => None,
+    }
+}
+
+/// Byte access to the emulated RAM Dolphin has mapped into its own address
+/// space. Reads are all-or-nothing, and each platform reader implements the
+/// raw read; everything above them is shared.
+trait EmuRam {
+    fn read_emu(&self, emu_addr: u32, buf: &mut [u8]) -> bool;
+
+    fn read_u8_emu(&self, emu_addr: u32) -> Option<u8> {
+        let mut buf = [0u8; 1];
+        self.read_emu(emu_addr, &mut buf).then_some(buf[0])
+    }
+
+    fn read_u32_be_emu(&self, emu_addr: u32) -> Option<u32> {
+        let mut buf = [0u8; 4];
+        self.read_emu(emu_addr, &mut buf)
+            .then_some(u32::from_be_bytes(buf))
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows {
     use super::*;
@@ -74,18 +156,6 @@ mod windows {
     /// This is Melee's controller struct, not raw PADStatus
     const MELEE_CONTROLLER_BASE: u32 = 0x804C1FAC;
     const CONTROLLER_STRUCT_SIZE: u32 = 0x44; // 68 bytes per controller
-    const SCENE_MAJOR_ADDR: u32 = 0x80479D30;
-    const SCENE_MINOR_ADDR: u32 = 0x80479D33;
-    const MENU_PLAYER_ONE_PORT_ADDR: u32 = 0x804D6598;
-    const CSSDT_BUF_ADDR: u32 = 0x80005614;
-    const SLIPPI_LOCAL_INDEX_OFFSET: u32 = 0x03;
-
-    const SCENE_VS_ONLINE: u8 = 0x08;
-    const SCENE_VS_ONLINE_CSS: u8 = 0x00;
-    const SCENE_VS_ONLINE_SSS: u8 = 0x01;
-    const SCENE_VS_ONLINE_INGAME: u8 = 0x02;
-    const SCENE_VS_ONLINE_VERSUS: u8 = 0x04;
-    const SCENE_VS_ONLINE_RANKED: u8 = 0x05;
 
     /// Offsets within the Melee controller struct
     const OFFSET_BUTTONS: usize = 0x00;      // u32 buttons pressed
@@ -267,58 +337,12 @@ mod windows {
 
             Ok(InputReport {
                 ports,
-                auto_port: self.detect_slippi_auto_port(),
+                auto_port: detect_slippi_local_port(self),
             })
-        }
-
-        fn detect_slippi_auto_port(&self) -> Option<u8> {
-            let scene_major = self.read_u8_emu(SCENE_MAJOR_ADDR)?;
-            if scene_major != SCENE_VS_ONLINE {
-                return None;
-            }
-
-            let scene_minor = self.read_u8_emu(SCENE_MINOR_ADDR)?;
-
-            match scene_minor {
-                SCENE_VS_ONLINE_INGAME | SCENE_VS_ONLINE_VERSUS | SCENE_VS_ONLINE_RANKED => {
-                    let slippi_ptr = self.read_u32_emu_be(CSSDT_BUF_ADDR)?;
-                    if (slippi_ptr & 0x8000_0000) == 0 {
-                        return None;
-                    }
-
-                    let local_port = self.read_u8_emu(slippi_ptr.wrapping_add(SLIPPI_LOCAL_INDEX_OFFSET))?;
-                    (local_port <= 3).then_some(local_port)
-                }
-                SCENE_VS_ONLINE_CSS | SCENE_VS_ONLINE_SSS => {
-                    let menu_port = self.read_u8_emu(MENU_PLAYER_ONE_PORT_ADDR)?;
-                    (menu_port <= 3).then_some(menu_port)
-                }
-                _ => None,
-            }
         }
 
         fn emu_to_host_addr(&self, emu_addr: u32) -> usize {
             self.gc_ram_base + (emu_addr & 0x01FF_FFFF) as usize
-        }
-
-        fn read_u8_emu(&self, emu_addr: u32) -> Option<u8> {
-            let host_addr = self.emu_to_host_addr(emu_addr);
-            let mut buf = [0u8; 1];
-            if self.read_memory(host_addr, &mut buf) {
-                Some(buf[0])
-            } else {
-                None
-            }
-        }
-
-        fn read_u32_emu_be(&self, emu_addr: u32) -> Option<u32> {
-            let host_addr = self.emu_to_host_addr(emu_addr);
-            let mut buf = [0u8; 4];
-            if self.read_memory(host_addr, &mut buf) {
-                Some(u32::from_be_bytes(buf))
-            } else {
-                None
-            }
         }
 
         fn read_memory(&self, addr: usize, buf: &mut [u8]) -> bool {
@@ -333,6 +357,12 @@ mod windows {
                 ) != FALSE
                     && bytes_read == buf.len()
             }
+        }
+    }
+
+    impl EmuRam for DolphinReader {
+        fn read_emu(&self, emu_addr: u32, buf: &mut [u8]) -> bool {
+            self.read_memory(self.emu_to_host_addr(emu_addr), buf)
         }
     }
 
@@ -393,18 +423,6 @@ mod macos {
     /// This is Melee's controller struct, not raw PADStatus
     const MELEE_CONTROLLER_BASE: u32 = 0x804C1FAC;
     const CONTROLLER_STRUCT_SIZE: u32 = 0x44; // 68 bytes per controller
-    const SCENE_MAJOR_ADDR: u32 = 0x80479D30;
-    const SCENE_MINOR_ADDR: u32 = 0x80479D33;
-    const MENU_PLAYER_ONE_PORT_ADDR: u32 = 0x804D6598;
-    const CSSDT_BUF_ADDR: u32 = 0x80005614;
-    const SLIPPI_LOCAL_INDEX_OFFSET: u32 = 0x03;
-
-    const SCENE_VS_ONLINE: u8 = 0x08;
-    const SCENE_VS_ONLINE_CSS: u8 = 0x00;
-    const SCENE_VS_ONLINE_SSS: u8 = 0x01;
-    const SCENE_VS_ONLINE_INGAME: u8 = 0x02;
-    const SCENE_VS_ONLINE_VERSUS: u8 = 0x04;
-    const SCENE_VS_ONLINE_RANKED: u8 = 0x05;
 
     /// Offsets within the Melee controller struct
     const OFFSET_BUTTONS: usize = 0x00;      // u32 buttons pressed
@@ -593,62 +611,22 @@ mod macos {
 
             Ok(InputReport {
                 ports,
-                auto_port: self.detect_slippi_auto_port(),
+                auto_port: detect_slippi_local_port(self),
             })
-        }
-
-        fn detect_slippi_auto_port(&self) -> Option<u8> {
-            let scene_major = self.read_u8_emu(SCENE_MAJOR_ADDR)?;
-            if scene_major != SCENE_VS_ONLINE {
-                return None;
-            }
-
-            let scene_minor = self.read_u8_emu(SCENE_MINOR_ADDR)?;
-
-            match scene_minor {
-                SCENE_VS_ONLINE_INGAME | SCENE_VS_ONLINE_VERSUS | SCENE_VS_ONLINE_RANKED => {
-                    let slippi_ptr = self.read_u32_emu_be(CSSDT_BUF_ADDR)?;
-                    if (slippi_ptr & 0x8000_0000) == 0 {
-                        return None;
-                    }
-
-                    let local_port = self.read_u8_emu(slippi_ptr.wrapping_add(SLIPPI_LOCAL_INDEX_OFFSET))?;
-                    (local_port <= 3).then_some(local_port)
-                }
-                SCENE_VS_ONLINE_CSS | SCENE_VS_ONLINE_SSS => {
-                    let menu_port = self.read_u8_emu(MENU_PLAYER_ONE_PORT_ADDR)?;
-                    (menu_port <= 3).then_some(menu_port)
-                }
-                _ => None,
-            }
         }
 
         fn emu_to_host_addr(&self, emu_addr: u32) -> mach_vm_address_t {
             self.gc_ram_base + (emu_addr & 0x01FF_FFFF) as u64
         }
 
-        fn read_u8_emu(&self, emu_addr: u32) -> Option<u8> {
-            let host_addr = self.emu_to_host_addr(emu_addr);
-            let mut buf = [0u8; 1];
-            if self.read_memory(host_addr, &mut buf) {
-                Some(buf[0])
-            } else {
-                None
-            }
-        }
-
-        fn read_u32_emu_be(&self, emu_addr: u32) -> Option<u32> {
-            let host_addr = self.emu_to_host_addr(emu_addr);
-            let mut buf = [0u8; 4];
-            if self.read_memory(host_addr, &mut buf) {
-                Some(u32::from_be_bytes(buf))
-            } else {
-                None
-            }
-        }
-
         fn read_memory(&self, addr: mach_vm_address_t, buf: &mut [u8]) -> bool {
             unsafe { read_raw(self.task, addr, buf) }
+        }
+    }
+
+    impl EmuRam for DolphinReader {
+        fn read_emu(&self, emu_addr: u32, buf: &mut [u8]) -> bool {
+            self.read_memory(self.emu_to_host_addr(emu_addr), buf)
         }
     }
 
@@ -776,3 +754,101 @@ pub use linux::DolphinReader;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub use unsupported::DolphinReader;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Sparse stand-in for emulated RAM. Unmapped bytes fail to read, the same
+    /// way a real read of an unmapped address does.
+    #[derive(Default)]
+    struct FakeRam(HashMap<u32, u8>);
+
+    impl FakeRam {
+        fn byte(mut self, addr: u32, value: u8) -> Self {
+            self.0.insert(addr, value);
+            self
+        }
+
+        fn word(self, addr: u32, value: u32) -> Self {
+            self.byte(addr, (value >> 24) as u8)
+                .byte(addr + 1, (value >> 16) as u8)
+                .byte(addr + 2, (value >> 8) as u8)
+                .byte(addr + 3, value as u8)
+        }
+
+        fn scene(self, major: u8, minor: u8) -> Self {
+            self.byte(SCENE_MAJOR_ADDR, major)
+                .byte(SCENE_MINOR_ADDR, minor)
+        }
+
+        /// An online match: scene 0x08/0x02 with the online data buffer Slippi
+        /// allocates when the match starts.
+        fn online_match(self, buffer: u32, local: u8, opponent: u8) -> Self {
+            self.scene(SCENE_ONLINE, SCENE_ONLINE_IN_GAME)
+                .word(ONLINE_DATA_BUF_PTR_ADDR, buffer)
+                .byte(buffer + ONLINE_DATA_BUF_LOCAL_PORT, local)
+                .byte(buffer + ONLINE_DATA_BUF_OPPONENT_PORT, opponent)
+        }
+    }
+
+    impl EmuRam for FakeRam {
+        fn read_emu(&self, emu_addr: u32, buf: &mut [u8]) -> bool {
+            for (offset, byte) in buf.iter_mut().enumerate() {
+                match self.0.get(&(emu_addr.wrapping_add(offset as u32))) {
+                    Some(value) => *byte = *value,
+                    None => return false,
+                }
+            }
+            true
+        }
+    }
+
+    /// This is the bug: with the local player on port 2, the viewer used to
+    /// follow the stale CSS match-state pointer and read the low byte of an
+    /// allocation address as if it were a port (here 0, the opponent's port).
+    #[test]
+    fn online_match_follows_the_local_port() {
+        let ram = FakeRam::default()
+            .online_match(0x80B0_0000, 2, 0)
+            .word(0x8000_5614, 0x80B0_0000)
+            .byte(0x80B0_0003, 0);
+        assert_eq!(detect_slippi_local_port(&ram), Some(2));
+    }
+
+    #[test]
+    fn online_css_follows_the_port_in_use() {
+        let ram = FakeRam::default()
+            .scene(SCENE_ONLINE, SCENE_ONLINE_CSS)
+            .byte(ONLINE_MENU_LOCAL_PORT_ADDR, 1);
+        assert_eq!(detect_slippi_local_port(&ram), Some(1));
+    }
+
+    #[test]
+    fn untrustworthy_buffers_are_not_a_port() {
+        // Buffer slot never filled in (Dolphin started, no match this boot).
+        let unset = FakeRam::default().scene(SCENE_ONLINE, SCENE_ONLINE_IN_GAME);
+        assert_eq!(detect_slippi_local_port(&unset), None);
+
+        // Slot holds something that is not a GameCube RAM pointer.
+        let not_a_pointer = FakeRam::default()
+            .scene(SCENE_ONLINE, SCENE_ONLINE_IN_GAME)
+            .word(ONLINE_DATA_BUF_PTR_ADDR, 0x0000_0000);
+        assert_eq!(detect_slippi_local_port(&not_a_pointer), None);
+
+        // Buffer claims both players are on the same port, so it cannot say
+        // which of the two is the local player.
+        let same_port = FakeRam::default().online_match(0x80B0_0000, 1, 1);
+        assert_eq!(detect_slippi_local_port(&same_port), None);
+    }
+
+    #[test]
+    fn offline_and_replay_scenes_have_no_local_port() {
+        let offline_versus = FakeRam::default().scene(0x02, 0x02);
+        assert_eq!(detect_slippi_local_port(&offline_versus), None);
+
+        let replay = FakeRam::default().scene(0x0E, 0x01);
+        assert_eq!(detect_slippi_local_port(&replay), None);
+    }
+}
