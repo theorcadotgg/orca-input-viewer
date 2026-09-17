@@ -111,7 +111,7 @@ jobs:
           Write-Host "::warning::WINDOWS_CERT_PFX_B64 is not set - publishing UNSIGNED Windows installers. SmartScreen will warn users until a code-signing certificate is added (see RELEASING.md)."
 
       - name: Build, sign & upload
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -207,7 +207,7 @@ jobs:
           mv tauri.conf.json.tmp src-tauri/tauri.conf.json
 
       - name: Build, sign, notarize & upload
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
