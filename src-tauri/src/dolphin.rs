@@ -696,6 +696,7 @@ mod linux {
         const MAX_SCAN: usize = 512 * 1024 * 1024;
 
         let mut first_mapping: Option<usize> = None;
+        let mut first_header: Option<usize> = None;
 
         for region in regions {
             // Smaller than MEM1 itself cannot hold emulated RAM at offset 0.
@@ -705,33 +706,71 @@ mod linux {
             if region.size() == MEM1_MAPPING && first_mapping.is_none() {
                 first_mapping = Some(region.start);
             }
-            if region.size() <= MAX_SCAN {
-                if let Some(base) = find_disc_header(mem, region) {
-                    return Some(base);
+            if region.size() > MAX_SCAN {
+                continue;
+            }
+
+            // A header alone does not prove the base: Dolphin reads the same 0x20
+            // bytes to identify the disc and keeps them in its heap, which sits
+            // lower in the address space than MEM1 does. Only a candidate whose
+            // controller array reads like controller data is MEM1.
+            let mut from = 0;
+            while let Some(candidate) = find_disc_header(mem, region, from) {
+                first_header.get_or_insert(candidate);
+                if looks_like_controller_data(mem, candidate) {
+                    return Some(candidate);
+                }
+                from = candidate - region.start + PAGE_SIZE;
+            }
+        }
+
+        first_header.or(first_mapping)
+    }
+
+    const PAGE_SIZE: usize = 4096;
+
+    /// Melee's controller array is 0x4C1FAC bytes into MEM1 and its structs hold
+    /// stick floats in [-1, 1] and a plugged byte of 0 or 1. Heap bytes that
+    /// happen to start with a disc header satisfy neither, which is what tells
+    /// the real MEM1 apart from them.
+    fn looks_like_controller_data(mem: &File, base: usize) -> bool {
+        for port in 0..4u32 {
+            let mut buf = [0u8; CONTROLLER_STRUCT_SIZE as usize];
+            let emulated = MELEE_CONTROLLER_BASE + port * CONTROLLER_STRUCT_SIZE;
+            let host = base + (emulated & 0x01FF_FFFF) as usize;
+            if !mem.read_at(&mut buf, host as u64).is_ok_and(|n| n == buf.len()) {
+                return false;
+            }
+            if buf[OFFSET_PLUGGED] > 1 {
+                return false;
+            }
+            for offset in [OFFSET_STICK_X, OFFSET_STICK_Y, OFFSET_CSTICK_X, OFFSET_CSTICK_Y] {
+                let value = read_f32_be(&buf, offset);
+                if !value.is_finite() || value.abs() > 2.0 {
+                    return false;
                 }
             }
         }
 
-        first_mapping
+        true
     }
 
-    /// Scan a region on page boundaries for the disc header, which sits at MEM1's
-    /// host base. Mappings are page-aligned and MEM1 begins a mapping, so every
-    /// possible base is page-aligned within the region.
-    fn find_disc_header(mem: &File, region: &Region) -> Option<usize> {
-        const PAGE: usize = 4096;
+    /// Scan a region on page boundaries for the next disc header at or after
+    /// `from`, which sits at MEM1's host base. Mappings are page-aligned and MEM1
+    /// begins a mapping, so every possible base is page-aligned within the region.
+    fn find_disc_header(mem: &File, region: &Region, from: usize) -> Option<usize> {
         const CHUNK: usize = 1024 * 1024;
 
         let mut buf = vec![0u8; CHUNK];
-        let mut offset = 0;
+        let mut offset = from;
 
-        while offset < region.size() {
+        while offset + 8 <= region.size() {
             let len = CHUNK.min(region.size() - offset);
             let Ok(read) = mem.read_at(&mut buf[..len], (region.start + offset) as u64) else {
                 // An unreadable stretch ends the searchable part of the mapping.
                 break;
             };
-            if read == 0 {
+            if read < 8 {
                 break;
             }
 
@@ -740,7 +779,7 @@ mod linux {
                 if is_melee_disc_header(&buf[pos..pos + 8]) {
                     return Some(region.start + offset + pos);
                 }
-                pos += PAGE;
+                pos += PAGE_SIZE;
             }
 
             offset += read;
@@ -792,7 +831,6 @@ mod linux_tests {
     use super::*;
     use std::io::{BufRead, BufReader, Cursor, Write};
     use std::process::{Child, Command, Stdio};
-    use std::time::{Duration, Instant};
 
     const HELPER_ENV: &str = "ORCA_RAM_HELPER";
     const LAYOUT_ENV: &str = "ORCA_RAM_HELPER_LAYOUT";
@@ -807,12 +845,18 @@ mod linux_tests {
         /// MEM1 32MB into a 96MB region: adjacent anonymous mappings merged by the
         /// kernel into one VMA, which is what Linux can hand us.
         Merged,
+        /// MEM1 32MB into a 96MB region with a decoy disc header at the very start
+        /// and heap-like garbage where its controller array would be - Dolphin
+        /// keeps a copy of those 0x20 header bytes in its heap, and that copy sits
+        /// lower in the address space, so a content-only match finds it first.
+        Decoy,
     }
 
     impl Layout {
         fn from_env() -> Self {
             match std::env::var(LAYOUT_ENV).as_deref() {
                 Ok("merged") => Layout::Merged,
+                Ok("decoy") => Layout::Decoy,
                 _ => Layout::Separate,
             }
         }
@@ -821,20 +865,21 @@ mod linux_tests {
             match self {
                 Layout::Separate => "separate",
                 Layout::Merged => "merged",
+                Layout::Decoy => "decoy",
             }
         }
 
         fn region_size(self) -> usize {
             match self {
                 Layout::Separate => 32 * 1024 * 1024,
-                Layout::Merged => 96 * 1024 * 1024,
+                Layout::Merged | Layout::Decoy => 96 * 1024 * 1024,
             }
         }
 
         fn mem1_offset(self) -> usize {
             match self {
                 Layout::Separate => 0,
-                Layout::Merged => 32 * 1024 * 1024,
+                Layout::Merged | Layout::Decoy => 32 * 1024 * 1024,
             }
         }
     }
@@ -884,6 +929,18 @@ garbage
         // Where MEM1 sits inside the mapping the parent will find in /proc/pid/maps.
         let mem1 = layout.mem1_offset();
 
+        // Dolphin reads the disc's first 0x20 bytes to identify it and keeps them
+        // in its heap; plant that same copy where it would sit - below MEM1 - with
+        // garbage where a controller array would be, so a reader that trusts the
+        // header alone picks it.
+        if layout == Layout::Decoy {
+            ram[..8].copy_from_slice(b"GALE0101");
+            let decoy = ram_offset(MELEE_CONTROLLER_BASE) + CONTROLLER_STRUCT_SIZE as usize;
+            ram[decoy + OFFSET_PLUGGED] = 0xFF;
+            ram[decoy + OFFSET_STICK_X..decoy + OFFSET_STICK_X + 4]
+                .copy_from_slice(&f32::INFINITY.to_be_bytes());
+        }
+
         // Dolphin copies the disc header to emulated 0x80000000 at boot, so MEM1
         // starts with the disc ID.
         ram[mem1..mem1 + 8].copy_from_slice(b"GALE0101");
@@ -926,6 +983,14 @@ garbage
     #[test]
     fn reads_controller_state_when_mem1_sits_inside_a_merged_mapping() {
         reads_planted_state(Layout::Merged);
+    }
+
+    /// Dolphin's heap holds a copy of the same 0x20 disc-header bytes, lower in the
+    /// address space than MEM1. A reader that accepts the first header it finds
+    /// reads that copy and reports nonsense inputs.
+    #[test]
+    fn prefers_the_header_carrying_controller_data_over_a_heap_copy() {
+        reads_planted_state(Layout::Decoy);
     }
 
     fn reads_planted_state(layout: Layout) {
