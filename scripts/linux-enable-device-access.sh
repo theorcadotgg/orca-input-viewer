@@ -47,7 +47,7 @@ kernel.yama.ptrace_scope is 1, so reading Dolphin's memory is denied. Pick one:
                 sudo sysctl -w kernel.yama.ptrace_scope=0
 
   .deb/.rpm - grant just this binary the capability, which is narrower:
-                sudo setcap cap_sys_ptrace=eip "$(command -v orca-input-viewer)"
+                sudo setcap cap_sys_ptrace=eip "$(command -v orca_input_viewer)"
 
 Without this the viewer still works in standalone (USB adapter) mode.
 EOF

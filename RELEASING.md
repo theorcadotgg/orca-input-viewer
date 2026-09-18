@@ -229,7 +229,7 @@ emulator's memory. Two independent things have to be true:
    # AppImage: allow ptrace system-wide (persist in /etc/sysctl.d/99-orca.conf)
    sudo sysctl -w kernel.yama.ptrace_scope=0
    # or .deb/.rpm: grant the capability to just this binary
-   sudo setcap cap_sys_ptrace=eip "$(command -v orca-input-viewer)"
+   sudo setcap cap_sys_ptrace=eip "$(command -v orca_input_viewer)"
    ```
 
 Standalone (USB adapter) mode needs no ptrace permission, only the udev rules.
