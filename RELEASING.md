@@ -249,6 +249,14 @@ emulator's memory. Two independent things have to be true:
 
 ### Wayland
 
+The AppImage is assembled with linuxdeploy's GTK hook, which pins
+`GDK_BACKEND=x11` because WebKitGTK once crashed on Wayland. On a session with no
+X server that cannot work — GTK fails to initialise and the process dies before a
+window appears — so the app forces `GDK_BACKEND=wayland` when Wayland is the only
+display on offer, and leaves the bundle's choice alone where X is advertised
+(XWayland desktops keep working as before). Users can override either way by
+exporting `GDK_BACKEND` themselves.
+
 The overlay window appears, but Wayland has no always-on-top hint, so Tauri's
 `always_on_top` and window positioning silently do nothing there
 ([tauri#14913](https://github.com/tauri-apps/tauri/issues/14913),

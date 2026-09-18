@@ -1021,12 +1021,20 @@ fn map_tauri_err(err: tauri::Error) -> String {
     err.to_string()
 }
 
-/// WebKitGTK's DMABUF renderer kills the Wayland connection as soon as a window
-/// is translucent on NVIDIA ("Gdk-Message: Error 71 (Protocol error) dispatching
-/// to Wayland display", tauri-apps/tauri#14924). The overlay window is
-/// transparent by design, so on NVIDIA fall back to the non-DMABUF renderer
-/// before WebKit initialises. That costs the overlay its transparency on Linux,
-/// which is why the OBS browser source is the recommended path there anyway.
+/// Workarounds for the Linux desktop stack, applied before the window is created.
+///
+///  * WebKitGTK's DMABUF renderer kills the Wayland connection as soon as a
+///    window is translucent on NVIDIA ("Gdk-Message: Error 71 (Protocol error)
+///    dispatching to Wayland display", tauri-apps/tauri#14924). The overlay
+///    window is transparent by design, so on NVIDIA fall back to the non-DMABUF
+///    renderer. That costs the overlay its transparency on Linux, which is why
+///    the OBS browser source is the recommended path there anyway.
+///
+///  * Tauri's AppImage is assembled with linuxdeploy's GTK hook, which pins
+///    `GDK_BACKEND=x11` because WebKitGTK once crashed on Wayland. On a Wayland
+///    session without an X server that cannot work and GTK fails to initialise,
+///    so when Wayland is the only display available, pick it. GTK initialises
+///    after this runs, so the choice still lands.
 #[cfg(target_os = "linux")]
 fn apply_linux_render_workarounds() {
     const VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
@@ -1034,6 +1042,13 @@ fn apply_linux_render_workarounds() {
     if std::env::var_os(VAR).is_none() && std::path::Path::new("/proc/driver/nvidia/version").exists() {
         std::env::set_var(VAR, "1");
         eprintln!("nvidia driver detected: setting {VAR}=1 to keep WebKitGTK off the DMABUF renderer");
+    }
+
+    let has_wayland = std::env::var("WAYLAND_DISPLAY").is_ok_and(|d| !d.is_empty());
+    let has_x = std::env::var("DISPLAY").is_ok_and(|d| !d.is_empty());
+    if has_wayland && !has_x {
+        std::env::set_var("GDK_BACKEND", "wayland");
+        eprintln!("no X display available: forcing GDK_BACKEND=wayland");
     }
 }
 
