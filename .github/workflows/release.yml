@@ -1,4 +1,4 @@
-name: Release (Windows + macOS)
+name: Release (Windows + macOS + Linux)
 
 on:
   push:
@@ -250,8 +250,67 @@ jobs:
           spctl -a -t open --context context:primary-signature -vv "$dmg"
           gh release upload "${{ github.ref_name }}" "$dmg" --clobber
 
+  linux:
+    needs: prepare
+    permissions:
+      contents: write
+    # Pinned rather than ubuntu-latest: the AppImage must be built against the
+    # oldest base system we support, and 22.04 is the oldest that still ships
+    # WebKitGTK 4.1 (https://v2.tauri.app/distribute/appimage/).
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils libusb-1.0-0-dev libudev-dev
+
+      - name: Validate updater pubkey configured
+        run: |
+          set -euo pipefail
+          pubkey=$(jq -r '.plugins.updater.pubkey // ""' src-tauri/tauri.conf.json)
+          if [ -z "$pubkey" ] || [[ "$pubkey" == REPLACE_ME* ]]; then
+            echo "Replace plugins.updater.pubkey in tauri.conf.json before releasing." >&2
+            exit 1
+          fi
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Configure Tauri Linux artifacts
+        run: |
+          set -euo pipefail
+          # createUpdaterArtifacts gives the AppImage its .sig, which is the only
+          # Linux artifact the updater can use; deb and rpm are install packages.
+          jq '.bundle.createUpdaterArtifacts = true' src-tauri/tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp src-tauri/tauri.conf.json
+
+      - name: Test
+        run: cargo test
+        working-directory: ./src-tauri
+
+      - name: Build & upload
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: "src-tauri"
+          args: "--target x86_64-unknown-linux-gnu --bundles deb,rpm,appimage"
+          retryAttempts: 3
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+
   publish:
-    needs: [windows, macos]
+    needs: [windows, macos, linux]
     permissions:
       contents: write
     runs-on: ubuntu-latest

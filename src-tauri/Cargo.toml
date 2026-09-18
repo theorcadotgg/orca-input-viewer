@@ -24,3 +24,7 @@ winapi = { version = "0.3", features = ["memoryapi", "processthreadsapi", "tlhel
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.4"
+
+# The Linux reader tests map a stand-in for Dolphin's RAM, which needs raw mmap.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"

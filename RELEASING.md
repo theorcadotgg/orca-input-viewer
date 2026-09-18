@@ -1,4 +1,4 @@
-# Orca Input Viewer — Signing + Auto-Updates (Windows + macOS)
+# Orca Input Viewer — Signing + Auto-Updates (Windows + macOS + Linux)
 
 This repo is set up to ship **signed** Windows installers and support **in-app auto-updates** via **GitHub Releases**.
 
@@ -185,13 +185,79 @@ Both need the modifying app to hold the **App Management** permission
 first use; a terminal needs to be enabled there manually. Slippi Launcher replaces
 its Dolphin on update, so re-run this after an update.
 
-### CI (Windows + macOS)
+## Linux
+
+Runs on x86_64 (the CI target is `x86_64-unknown-linux-gnu`); the AppImage is the
+updatable artifact, since Tauri's updater has no deb/rpm path.
+
+### Build
+
+Install Rust plus the Tauri system dependencies (Arch/Omarchy names; `patchelf`
+and `xdg-utils` are what the AppImage bundler's linuxdeploy step needs):
+
+```sh
+sudo pacman -S --needed base-devel webkit2gtk-4.1 librsvg pkgconf patchelf xdg-utils
+cargo install tauri-cli --version '^2' --locked
+cd OrcaInputViewer
+cargo tauri build --bundles deb,appimage
+```
+
+On Debian/Ubuntu the build dependencies are
+`libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils`.
+Build the AppImage on the oldest distribution you intend to support — the bundle
+links against that system's WebKitGTK.
+
+A `tauri-cli` newer than the `tauri` crate in `Cargo.lock` logs
+`Failed to add bundler type to the binary: __TAURI_BUNDLE_TYPE variable not found`.
+It is harmless: the marker only exists in matching versions, and the updater
+decides deb vs AppImage from the package itself rather than from that marker.
+
+### Device access
+
+`scripts/linux-enable-device-access.sh` installs the udev rules for the GameCube
+adapter and the RP2040 config port, then reports whether Dolphin mode can read the
+emulator's memory. Two independent things have to be true:
+
+1. **udev rules** — without them the adapter and config interface are root-owned and
+   the viewer cannot open them. The rules grant the logged-in user access
+   (`TAG+="uaccess"`); replug the devices afterwards.
+2. **ptrace access** — Dolphin mode reads the emulator's emulated RAM out of
+   `/proc/<pid>/mem`, which the kernel gates on `kernel.yama.ptrace_scope`. With the
+   default of `1` the viewer reports the fix in its error message:
+
+   ```sh
+   # AppImage: allow ptrace system-wide (persist in /etc/sysctl.d/99-orca.conf)
+   sudo sysctl -w kernel.yama.ptrace_scope=0
+   # or .deb/.rpm: grant the capability to just this binary
+   sudo setcap cap_sys_ptrace=eip "$(command -v orca-input-viewer)"
+   ```
+
+Standalone (USB adapter) mode needs no ptrace permission, only the udev rules.
+
+### Wayland
+
+The overlay window appears, but Wayland has no always-on-top hint, so Tauri's
+`always_on_top` and window positioning silently do nothing there
+([tauri#14913](https://github.com/tauri-apps/tauri/issues/14913),
+[tauri#13121](https://github.com/tauri-apps/tauri/issues/13121)) — the **Pin** button
+in the overlay titlebar and the **Pin** toggle have no effect under Hyprland and
+friends. Use **OBS browser source** for streaming: it is server-rendered to a
+browser, so it is unaffected. Transparency (`transparent: true` on the overlay
+window) also interacts badly with WebKitGTK's DMABUF renderer on NVIDIA
+([tauri#14924](https://github.com/tauri-apps/tauri/issues/14924)); if the overlay
+crashes or renders as black boxes, run with `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+(that disables transparency too, so the browser source is the better answer).
+
+### CI (Windows + macOS + Linux)
 
 `.github/workflows/release.yml` runs on `v*` tags (or manually):
 
 1. `prepare` creates a **draft** GitHub release for the tag.
-2. `windows` and `macos` build, sign and upload into that draft (macOS is
-   `aarch64-apple-darwin`, Developer ID signed and notarized). Tauri Action merges each
+2. `windows`, `macos` and `linux` build, sign and upload into that draft (macOS is
+   `aarch64-apple-darwin`, Developer ID signed and notarized; Linux is
+   `x86_64-unknown-linux-gnu`, producing a deb, an rpm and the signed AppImage that
+   the updater uses). The Linux job runs `cargo test` first, which exercises the
+   Dolphin memory reader against a real process. Tauri Action merges each
    job's entry into one `latest.json`.
 3. `publish` publishes the draft, so `releases/latest` — the updater endpoint — only ever
    points at a complete release.
@@ -207,7 +273,7 @@ Secrets to add under **Settings → Secrets and variables → Actions**:
 | `APPLE_ID` | macOS | Apple ID email |
 | `APPLE_PASSWORD` | macOS | **app-specific** password from appleid.apple.com, not the account password |
 | `APPLE_TEAM_ID` | macOS | team ID (`9987498A4X`) |
-| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | both | updater signing key |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | all | updater signing key (the Linux entry points at the AppImage signature) |
 
 Exporting the certificate for `APPLE_CERTIFICATE`: Keychain Access → *My Certificates* →
 expand “Developer ID Application: …” → right-click the key → *Export* → save as

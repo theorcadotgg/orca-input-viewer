@@ -994,7 +994,28 @@ fn map_tauri_err(err: tauri::Error) -> String {
     err.to_string()
 }
 
+/// WebKitGTK's DMABUF renderer kills the Wayland connection as soon as a window
+/// is translucent on NVIDIA ("Gdk-Message: Error 71 (Protocol error) dispatching
+/// to Wayland display", tauri-apps/tauri#14924). The overlay window is
+/// transparent by design, so on NVIDIA fall back to the non-DMABUF renderer
+/// before WebKit initialises. That costs the overlay its transparency on Linux,
+/// which is why the OBS browser source is the recommended path there anyway.
+#[cfg(target_os = "linux")]
+fn apply_linux_render_workarounds() {
+    const VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+
+    if std::env::var_os(VAR).is_none() && std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        std::env::set_var(VAR, "1");
+        eprintln!("nvidia driver detected: setting {VAR}=1 to keep WebKitGTK off the DMABUF renderer");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_linux_render_workarounds() {}
+
 fn main() {
+    apply_linux_render_workarounds();
+
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
