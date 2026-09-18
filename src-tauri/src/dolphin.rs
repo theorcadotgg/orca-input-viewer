@@ -666,43 +666,87 @@ mod linux {
         regions
     }
 
-    /// Every GameCube disc header is copied to emulated 0x80000000 at boot, so the
-    /// start of the RAM mapping reads back as the 8-character disc ID ("GALE01"
-    /// plus the maker code for Melee). Dolphin also maps large anonymous regions
-    /// for MEM2 and its caches, so the header - not the size alone - identifies
-    /// the RAM mapping.
-    fn has_disc_header(mem: &File, base: usize) -> bool {
-        let mut id = [0u8; 8];
-        mem.read_at(&mut id, base as u64).is_ok_and(|n| n == id.len())
-            && id
+    /// Melee leaves its disc header at emulated 0x80000000 at boot, so the bytes
+    /// there read back as the disc ID ("GALE01" plus the maker code). The game
+    /// code prefix keeps the scan from matching arbitrary runs of printable bytes
+    /// in Dolphin's heap; the controller addresses this reader uses are Melee's,
+    /// so requiring Melee's ID costs nothing.
+    fn is_melee_disc_header(bytes: &[u8]) -> bool {
+        bytes.len() >= 8
+            && bytes[..3] == *b"GAL"
+            && bytes[..8]
                 .iter()
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'Z'))
     }
 
-    /// Find MEM1's host mapping. Dolphin maps MEM1 as a 32MB anonymous region on
-    /// 64-bit Linux, and the region carries the disc header once a game is
-    /// loaded. Before a game is loaded no region has a header, so fall back to
-    /// the first 32MB region.
+    /// Find MEM1's host mapping.
+    ///
+    /// Dolphin maps MEM1, its fake VMEM and MEM2 as separate anonymous mappings on
+    /// 64-bit Linux, but the kernel merges adjacent mappings with identical
+    /// permissions into one region - so unlike macOS's VM regions or Windows's
+    /// MEM_MAPPED blocks, MEM1 is not reliably at a region start, it can sit at
+    /// any page offset inside a bigger one. Look for the disc header instead.
+    /// Before a game is loaded nothing carries a header, so fall back to the
+    /// mapping sizes the other platforms assume.
     fn find_gc_ram_base(mem: &File, regions: &[Region]) -> Option<usize> {
-        const GC_RAM_SIZE: usize = 32 * 1024 * 1024; // MEM1 (24MB) plus the 8MB tail
         const MEM1_SIZE: usize = 24 * 1024 * 1024;
+        const MEM1_MAPPING: usize = 32 * 1024 * 1024; // MEM1 (24MB) plus the 8MB tail
+        // MEM1 + VMEM + MEM2 merge into ~128MB; anything larger than this is a JIT
+        // arena or something else this reader would never touch.
+        const MAX_SCAN: usize = 512 * 1024 * 1024;
 
-        let mut first_size_match: Option<usize> = None;
+        let mut first_mapping: Option<usize> = None;
 
         for region in regions {
             // Smaller than MEM1 itself cannot hold emulated RAM at offset 0.
             if region.size() < MEM1_SIZE {
                 continue;
             }
-            if has_disc_header(mem, region.start) {
-                return Some(region.start);
+            if region.size() == MEM1_MAPPING && first_mapping.is_none() {
+                first_mapping = Some(region.start);
             }
-            if region.size() == GC_RAM_SIZE && first_size_match.is_none() {
-                first_size_match = Some(region.start);
+            if region.size() <= MAX_SCAN {
+                if let Some(base) = find_disc_header(mem, region) {
+                    return Some(base);
+                }
             }
         }
 
-        first_size_match
+        first_mapping
+    }
+
+    /// Scan a region on page boundaries for the disc header, which sits at MEM1's
+    /// host base. Mappings are page-aligned and MEM1 begins a mapping, so every
+    /// possible base is page-aligned within the region.
+    fn find_disc_header(mem: &File, region: &Region) -> Option<usize> {
+        const PAGE: usize = 4096;
+        const CHUNK: usize = 1024 * 1024;
+
+        let mut buf = vec![0u8; CHUNK];
+        let mut offset = 0;
+
+        while offset < region.size() {
+            let len = CHUNK.min(region.size() - offset);
+            let Ok(read) = mem.read_at(&mut buf[..len], (region.start + offset) as u64) else {
+                // An unreadable stretch ends the searchable part of the mapping.
+                break;
+            };
+            if read == 0 {
+                break;
+            }
+
+            let mut pos = 0;
+            while pos + 8 <= read {
+                if is_melee_disc_header(&buf[pos..pos + 8]) {
+                    return Some(region.start + offset + pos);
+                }
+                pos += PAGE;
+            }
+
+            offset += read;
+        }
+
+        None
     }
 }
 
@@ -748,9 +792,52 @@ mod linux_tests {
     use super::*;
     use std::io::{BufRead, BufReader, Cursor, Write};
     use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
 
     const HELPER_ENV: &str = "ORCA_RAM_HELPER";
+    const LAYOUT_ENV: &str = "ORCA_RAM_HELPER_LAYOUT";
     const HELPER_TEST: &str = "dolphin::linux_tests::plants_emulated_ram_for_the_parent";
+
+    /// Shape of the mapping the parent has to find MEM1 inside.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Layout {
+        /// MEM1 at the start of its own 32MB mapping, which is what the macOS and
+        /// Windows memory APIs present.
+        Separate,
+        /// MEM1 32MB into a 96MB region: adjacent anonymous mappings merged by the
+        /// kernel into one VMA, which is what Linux can hand us.
+        Merged,
+    }
+
+    impl Layout {
+        fn from_env() -> Self {
+            match std::env::var(LAYOUT_ENV).as_deref() {
+                Ok("merged") => Layout::Merged,
+                _ => Layout::Separate,
+            }
+        }
+
+        fn env_value(self) -> &'static str {
+            match self {
+                Layout::Separate => "separate",
+                Layout::Merged => "merged",
+            }
+        }
+
+        fn region_size(self) -> usize {
+            match self {
+                Layout::Separate => 32 * 1024 * 1024,
+                Layout::Merged => 96 * 1024 * 1024,
+            }
+        }
+
+        fn mem1_offset(self) -> usize {
+            match self {
+                Layout::Separate => 0,
+                Layout::Merged => 32 * 1024 * 1024,
+            }
+        }
+    }
 
     /// Emulated address -> offset inside the RAM mapping.
     fn ram_offset(emu_addr: u32) -> usize {
@@ -779,11 +866,12 @@ garbage
             return; // Regular run: the parent's test does the asserting.
         }
 
-        const SIZE: usize = 32 * 1024 * 1024;
+        let layout = Layout::from_env();
+        let size = layout.region_size();
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
-                SIZE,
+                size,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                 -1,
@@ -791,15 +879,18 @@ garbage
             )
         };
         assert_ne!(ptr, libc::MAP_FAILED, "helper could not map emulated RAM");
-        let ram = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, SIZE) };
+        let ram = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, size) };
 
-        // Dolphin copies the disc header to emulated 0x80000000 at boot, so the
-        // RAM mapping starts with the disc ID.
-        ram[..8].copy_from_slice(b"GALE0101");
+        // Where MEM1 sits inside the mapping the parent will find in /proc/pid/maps.
+        let mem1 = layout.mem1_offset();
+
+        // Dolphin copies the disc header to emulated 0x80000000 at boot, so MEM1
+        // starts with the disc ID.
+        ram[mem1..mem1 + 8].copy_from_slice(b"GALE0101");
 
         // Melee's controller array, with a controller in port 3.
         const PORT: usize = 2;
-        let base = ram_offset(MELEE_CONTROLLER_BASE) + PORT * CONTROLLER_STRUCT_SIZE as usize;
+        let base = mem1 + ram_offset(MELEE_CONTROLLER_BASE) + PORT * CONTROLLER_STRUCT_SIZE as usize;
         let controller = &mut ram[base..base + CONTROLLER_STRUCT_SIZE as usize];
         controller[OFFSET_BUTTONS..OFFSET_BUTTONS + 4]
             .copy_from_slice(&(PAD_BUTTON_A | PAD_BUTTON_START).to_be_bytes());
@@ -808,15 +899,15 @@ garbage
         controller[OFFSET_PLUGGED] = 1;
 
         // Slippi's online scene, which names the local player's port.
-        ram[ram_offset(SCENE_MAJOR_ADDR)] = SCENE_ONLINE;
-        ram[ram_offset(SCENE_MINOR_ADDR)] = SCENE_ONLINE_IN_GAME;
-        let ptr_addr = ram_offset(ONLINE_DATA_BUF_PTR_ADDR);
+        ram[mem1 + ram_offset(SCENE_MAJOR_ADDR)] = SCENE_ONLINE;
+        ram[mem1 + ram_offset(SCENE_MINOR_ADDR)] = SCENE_ONLINE_IN_GAME;
+        let ptr_addr = mem1 + ram_offset(ONLINE_DATA_BUF_PTR_ADDR);
         ram[ptr_addr..ptr_addr + 4].copy_from_slice(&0x8010_0000u32.to_be_bytes());
-        let buf = ram_offset(0x8010_0000);
+        let buf = mem1 + ram_offset(0x8010_0000);
         ram[buf + ONLINE_DATA_BUF_LOCAL_PORT as usize] = PORT as u8;
         ram[buf + ONLINE_DATA_BUF_OPPONENT_PORT as usize] = 1;
 
-        println!("base=0x{:x}", ptr as usize);
+        println!("mapping=0x{:x} mem1=0x{:x}", ptr as usize, ptr as usize + mem1);
         std::io::stdout().flush().expect("flush helper address");
 
         // Stay mapped until the parent closes stdin.
@@ -826,6 +917,18 @@ garbage
 
     #[test]
     fn reads_controller_state_out_of_a_live_process() {
+        reads_planted_state(Layout::Separate);
+    }
+
+    /// The layout a user hit: Linux merges Dolphin's adjacent anonymous mappings,
+    /// so MEM1 sits inside one large region instead of at the start of its own -
+    /// which is where the reader used to look for the disc header.
+    #[test]
+    fn reads_controller_state_when_mem1_sits_inside_a_merged_mapping() {
+        reads_planted_state(Layout::Merged);
+    }
+
+    fn reads_planted_state(layout: Layout) {
         if std::env::var_os(HELPER_ENV).is_some() {
             return;
         }
@@ -833,6 +936,7 @@ garbage
         let mut child = Command::new(std::env::current_exe().expect("test binary path"))
             .args(["--exact", HELPER_TEST, "--nocapture"])
             .env(HELPER_ENV, "1")
+            .env(LAYOUT_ENV, layout.env_value())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -874,12 +978,13 @@ garbage
         let mut lines = BufReader::new(stdout).lines();
         for _ in 0..50 {
             match lines.next() {
-                Some(Ok(line)) if line.starts_with("base=") => return lines,
+                Some(Ok(line)) if line.starts_with("mapping=") => return lines,
                 Some(Ok(_)) => continue,
                 Some(Err(err)) => panic!("helper output error: {err}"),
                 None => break,
             }
         }
+        let _ = child.kill();
         let status = child.wait();
         panic!("helper never reported its mapping (exit: {status:?})");
     }
