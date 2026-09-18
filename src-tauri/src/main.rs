@@ -18,16 +18,19 @@ mod dolphin;
 #[cfg(target_os = "macos")]
 mod macos_access;
 
-const ADAPTER_VID: u16 = 0x057e;
-const ADAPTER_PID: u16 = 0x0337;
+#[cfg(target_os = "linux")]
+mod linux_access;
+
+pub(crate) const ADAPTER_VID: u16 = 0x057e;
+pub(crate) const ADAPTER_PID: u16 = 0x0337;
 const ADAPTER_INTERFACE: u8 = 0;
 const ADAPTER_IN_EP: u8 = 0x81;
 const ADAPTER_OUT_EP: u8 = 0x02;
 const ADAPTER_CMD_BEGIN_POLLING: u8 = 0x13;
 const ADAPTER_CMD_STOP_POLLING: u8 = 0x14;
 
-const CONFIG_VID: u16 = 0x2e8a;
-const CONFIG_PID: u16 = 0x000a;
+pub(crate) const CONFIG_VID: u16 = 0x2e8a;
+pub(crate) const CONFIG_PID: u16 = 0x000a;
 const CONFIG_BAUD: u32 = 115200;
 
 const ORCA_CONFIG_PROTO_MAGIC: u32 = 0x4143524f;
@@ -587,8 +590,17 @@ fn run_dolphin_mode(app: AppHandle, running: Arc<AtomicBool>, shared: Arc<Shared
                     return;
                 }
                 Err(err) => {
-                    // Dolphin found but couldn't connect - report error and stop
-                    let _ = app.emit("adapter_error", format!("Dolphin found but couldn't connect: {err}"));
+                    // Dolphin found but couldn't connect. When the only thing in
+                    // the way is the Linux ptrace permission, say so on its own
+                    // event: the UI answers that one with a polkit prompt.
+                    if err.needs_access {
+                        let _ = app.emit("linux_access_required", err.message);
+                    } else {
+                        let _ = app.emit(
+                            "adapter_error",
+                            format!("Dolphin found but couldn't connect: {}", err.message),
+                        );
+                    }
                     running.store(false, Ordering::SeqCst);
                     return;
                 }
@@ -990,6 +1002,21 @@ fn enable_dolphin_debug_access() -> Result<String, String> {
     }
 }
 
+/// Linux only: make the one authorised change that lets Dolphin mode read the
+/// emulator's memory (and, along the way, that lets the adapter be opened).
+/// The UI calls this when a connection fails for lack of the ptrace permission.
+#[tauri::command]
+fn enable_linux_access() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_access::enable_access()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("Device access only needs fixing on Linux.".to_string())
+    }
+}
+
 fn map_tauri_err(err: tauri::Error) -> String {
     err.to_string()
 }
@@ -1034,6 +1061,7 @@ fn main() {
             stop_overlay_server,
             get_app_version,
             enable_dolphin_debug_access,
+            enable_linux_access,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -49,6 +49,9 @@ let isStreaming = false;
 let selectedInputMode = 'dolphin'; // Default to Dolphin mode
 let pendingUpdate = null;
 let isAutoPortActive = false;
+// One-shot: the Linux access prompt may fire once per manual Start Stream, so a
+// permission that turns out not to fix anything cannot loop the UI.
+let accessPrompted = false;
 
 // Build the SVG diagram
 buildDiagram(svg);
@@ -423,7 +426,15 @@ async function stopStream() {
   }
 }
 
-streamButton.addEventListener('click', () => void (isStreaming ? stopStream() : startStream()));
+streamButton.addEventListener('click', () => {
+  if (isStreaming) {
+    void stopStream();
+    return;
+  }
+  // A manual attempt re-arms the Linux access prompt.
+  accessPrompted = false;
+  void startStream();
+});
 
 // macOS: reading Dolphin's RAM needs the emulator signed with get-task-allow.
 enableMacAccess.addEventListener('click', async () => {
@@ -559,6 +570,30 @@ async function bootstrap() {
     setAdapterStatus(false, false);
     setInputMode(null);
     setNotice(connectionNotice, `Adapter error: ${event.payload}`, 'error');
+  });
+
+  // Linux refuses to read another process's memory until ptrace is allowed. The
+  // backend reports that case on its own event, so the fix is one authorisation
+  // prompt instead of an error the user has to decode.
+  await tauriListen('linux_access_required', async (event) => {
+    console.error('Linux access denied:', event.payload);
+    setStreamUI(false);
+    setAdapterStatus(false, false);
+    if (accessPrompted) {
+      setNotice(connectionNotice, `${event.payload}`, 'error');
+      return;
+    }
+    accessPrompted = true;
+
+    setNotice(connectionNotice, 'Asking for permission to read Slippi\'s memory...', 'info');
+    try {
+      setNotice(connectionNotice, await tauriInvoke('enable_linux_access'), 'success');
+    } catch (err) {
+      setNotice(connectionNotice, `${err.message || err}`, 'error');
+      return;
+    }
+    // The permission is in place: pick the stream back up where it stopped.
+    void startStream();
   });
 
   // Listen for input mode changes

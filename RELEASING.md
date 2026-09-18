@@ -223,16 +223,29 @@ emulator's memory. Two independent things have to be true:
    (`TAG+="uaccess"`); replug the devices afterwards.
 2. **ptrace access** — Dolphin mode reads the emulator's emulated RAM out of
    `/proc/<pid>/mem`, which the kernel gates on `kernel.yama.ptrace_scope`. With the
-   default of `1` the viewer reports the fix in its error message:
+   default of `1`, the first Start Stream that finds a Dolphin process fails, and the
+   viewer offers to fix it itself: it asks polkit (via `pkexec`) for one authorised
+   change, which writes the drop-in file below and applies it, then restarts the
+   stream. Declining is not sticky — the next Start Stream asks again.
+
+   The prompt needs a polkit authentication agent. GNOME, KDE and XFCE ship one;
+   minimal Wayland sessions (Hyprland, sway) do not, and there the app falls back to
+   printing the manual commands. On Arch that agent is `hyprpolkitagent` or
+   `polkit-gnome`.
 
    ```sh
-   # AppImage: allow ptrace system-wide (persist in /etc/sysctl.d/99-orca.conf)
+   # AppImage: allow ptrace system-wide (persist in /etc/sysctl.d/99-orca-input-viewer.conf)
    sudo sysctl -w kernel.yama.ptrace_scope=0
    # or .deb/.rpm: grant the capability to just this binary
    sudo setcap cap_sys_ptrace=eip "$(command -v orca_input_viewer)"
    ```
 
-Standalone (USB adapter) mode needs no ptrace permission, only the udev rules.
+   The capability route cannot work for an AppImage: it mounts read-only at a fresh
+   `/tmp/.mount_*` path on every launch, so no stable file exists to carry it.
+
+   The same authorised step installs the udev rules when they are missing, so a
+   Dolphin-mode user gets adapter access in the same breath. Standalone (USB adapter)
+   mode needs no ptrace permission at all, only those udev rules.
 
 ### Wayland
 

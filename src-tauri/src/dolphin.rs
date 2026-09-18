@@ -28,6 +28,37 @@ pub struct DolphinProcess {
     pub name: String,
 }
 
+/// Why attaching to the emulator failed.
+///
+/// `needs_access` marks the one failure the app can remove for the user: on
+/// Linux, reading another process's memory needs the ptrace permission that
+/// `kernel.yama.ptrace_scope` withholds by default. The UI turns that into a
+/// single polkit prompt instead of an error message.
+#[derive(Debug)]
+pub struct ConnectError {
+    pub needs_access: bool,
+    pub message: String,
+}
+
+impl ConnectError {
+    fn other(message: impl Into<String>) -> Self {
+        Self {
+            needs_access: false,
+            message: message.into(),
+        }
+    }
+
+    /// Only Linux refuses the ptrace permission today, so this stays gated with
+    /// its caller rather than being dead code on the other platforms.
+    #[cfg(target_os = "linux")]
+    fn needs_access(message: impl Into<String>) -> Self {
+        Self {
+            needs_access: true,
+            message: message.into(),
+        }
+    }
+}
+
 /// Find a running Dolphin or Slippi process
 pub fn find_dolphin_process() -> Option<DolphinProcess> {
     let system = System::new_with_specifics(
@@ -288,7 +319,7 @@ mod windows {
     }
 
     impl DolphinReader {
-        pub fn new(process: &DolphinProcess) -> Result<Self, String> {
+        pub fn new(process: &DolphinProcess) -> Result<Self, ConnectError> {
             unsafe {
                 let handle = OpenProcess(
                     PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
@@ -296,7 +327,7 @@ mod windows {
                     process.pid as DWORD,
                 );
                 if handle.is_null() {
-                    return Err("Failed to open Dolphin process".to_string());
+                    return Err(ConnectError::other("Failed to open Dolphin process"));
                 }
 
                 // Find the GameCube RAM region (32MB MEM_MAPPED region)
@@ -307,7 +338,9 @@ mod windows {
                     }),
                     None => {
                         CloseHandle(handle);
-                        Err("Could not find GameCube RAM in Dolphin memory".to_string())
+                        Err(ConnectError::other(
+                            "Could not find GameCube RAM in Dolphin memory",
+                        ))
                     }
                 }
             }
@@ -399,7 +432,7 @@ mod macos {
     }
 
     impl DolphinReader {
-        pub fn new(process: &DolphinProcess) -> Result<Self, String> {
+        pub fn new(process: &DolphinProcess) -> Result<Self, ConnectError> {
             unsafe {
                 let mut task: task_t = 0;
                 let kr = task_for_pid(
@@ -409,13 +442,12 @@ mod macos {
                 );
 
                 if kr != KERN_SUCCESS {
-                    return Err(format!(
+                    return Err(ConnectError::other(format!(
                         "macOS denied memory access to Dolphin (pid {}, error {}). The viewer needs \
                          the com.apple.security.cs.debugger entitlement and the emulator needs \
-                         com.apple.security.get-task-allow. Run \
-                         OrcaInputViewer/scripts/macos-enable-dolphin-access.sh once, then restart Dolphin.",
+                         com.apple.security.get-task-allow. Press Enable macOS Access, then restart Dolphin.",
                         process.pid, kr
-                    ));
+                    )));
                 }
 
                 // Find the GameCube RAM region (32MB region)
@@ -424,9 +456,10 @@ mod macos {
                         task,
                         gc_ram_base: base,
                     }),
-                    None => Err("Could not find GameCube RAM in Dolphin memory. \
-                                 Make sure a game is running in Dolphin."
-                        .to_string()),
+                    None => Err(ConnectError::other(
+                        "Could not find GameCube RAM in Dolphin memory. \
+                         Make sure a game is running in Dolphin.",
+                    )),
                 }
             }
         }
@@ -548,23 +581,30 @@ mod linux {
     }
 
     impl DolphinReader {
-        pub fn new(process: &DolphinProcess) -> Result<Self, String> {
+        pub fn new(process: &DolphinProcess) -> Result<Self, ConnectError> {
             // Reading another process's memory is a ptrace operation, so the
-            // kernel gates /proc/<pid>/mem on the same permission check.
+            // kernel gates /proc/<pid>/mem on the same permission check. Only a
+            // refused permission is something the app can fix for the user; a
+            // process that died mid-connect is not.
             let mem = File::open(format!("/proc/{}/mem", process.pid)).map_err(|e| {
-                format!(
-                    "Linux blocked access to Dolphin's memory (pid {}, {e}). Run \
-                     `sudo sysctl -w kernel.yama.ptrace_scope=0`, then Start Stream again.",
+                let message = format!(
+                    "Linux blocked access to Dolphin's memory (pid {}, {e}).",
                     process.pid
-                )
+                );
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    ConnectError::needs_access(message)
+                } else {
+                    ConnectError::other(message)
+                }
             })?;
 
             let regions = read_maps(process.pid)?;
             match find_gc_ram_base(&mem, &regions) {
                 Some(base) => Ok(DolphinReader { mem, gc_ram_base: base }),
-                None => Err("Could not find GameCube RAM in Dolphin memory. \
-                             Make sure a game is running in Dolphin."
-                    .to_string()),
+                None => Err(ConnectError::other(
+                    "Could not find GameCube RAM in Dolphin memory. \
+                     Make sure a game is running in Dolphin.",
+                )),
             }
         }
 
@@ -591,9 +631,9 @@ mod linux {
         }
     }
 
-    fn read_maps(pid: u32) -> Result<Vec<Region>, String> {
+    fn read_maps(pid: u32) -> Result<Vec<Region>, ConnectError> {
         let file = File::open(format!("/proc/{pid}/maps"))
-            .map_err(|e| format!("Could not read Dolphin's memory map: {e}"))?;
+            .map_err(|e| ConnectError::other(format!("Could not read Dolphin's memory map: {e}")))?;
 
         Ok(parse_maps(BufReader::new(file)))
     }
@@ -673,8 +713,10 @@ mod unsupported {
     pub struct DolphinReader;
 
     impl DolphinReader {
-        pub fn new(_process: &DolphinProcess) -> Result<Self, String> {
-            Err("Dolphin memory reading not supported on this platform".to_string())
+        pub fn new(_process: &DolphinProcess) -> Result<Self, ConnectError> {
+            Err(ConnectError::other(
+                "Dolphin memory reading not supported on this platform",
+            ))
         }
 
         pub fn read_controller_state(&self) -> Result<InputReport, String> {
