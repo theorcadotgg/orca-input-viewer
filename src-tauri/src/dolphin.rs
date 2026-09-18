@@ -724,7 +724,16 @@ mod linux {
             }
         }
 
-        first_header.or(first_mapping)
+        // Nothing validated. With no header anywhere the game simply has not
+        // booted yet, and the 32MB mapping is the best guess - that is the case
+        // the other platforms' readers cover with the same fallback. With headers
+        // present but no controller data to match, there is no trustworthy base:
+        // returning one of them would show nonsense inputs, so report instead.
+        if first_header.is_none() {
+            first_mapping
+        } else {
+            None
+        }
     }
 
     const PAGE_SIZE: usize = 4096;
@@ -850,6 +859,9 @@ mod linux_tests {
         /// keeps a copy of those 0x20 header bytes in its heap, and that copy sits
         /// lower in the address space, so a content-only match finds it first.
         Decoy,
+        /// The same decoy with no readable MEM1 behind it, which is what a game
+        /// that has not booted looks like once Dolphin's heap holds the header.
+        DecoyOnly,
     }
 
     impl Layout {
@@ -857,6 +869,7 @@ mod linux_tests {
             match std::env::var(LAYOUT_ENV).as_deref() {
                 Ok("merged") => Layout::Merged,
                 Ok("decoy") => Layout::Decoy,
+                Ok("decoy-only") => Layout::DecoyOnly,
                 _ => Layout::Separate,
             }
         }
@@ -866,6 +879,7 @@ mod linux_tests {
                 Layout::Separate => "separate",
                 Layout::Merged => "merged",
                 Layout::Decoy => "decoy",
+                Layout::DecoyOnly => "decoy-only",
             }
         }
 
@@ -873,14 +887,21 @@ mod linux_tests {
             match self {
                 Layout::Separate => 32 * 1024 * 1024,
                 Layout::Merged | Layout::Decoy => 96 * 1024 * 1024,
+                Layout::DecoyOnly => 32 * 1024 * 1024,
             }
         }
 
         fn mem1_offset(self) -> usize {
             match self {
-                Layout::Separate => 0,
+                Layout::Separate | Layout::DecoyOnly => 0,
                 Layout::Merged | Layout::Decoy => 32 * 1024 * 1024,
             }
+        }
+
+        /// DecoyOnly plants the header copy and nothing else, so everything a
+        /// reader could find belongs to the decoy.
+        fn plants_controller_data(self) -> bool {
+            self != Layout::DecoyOnly
         }
     }
 
@@ -933,12 +954,20 @@ garbage
         // in its heap; plant that same copy where it would sit - below MEM1 - with
         // garbage where a controller array would be, so a reader that trusts the
         // header alone picks it.
-        if layout == Layout::Decoy {
+        if matches!(layout, Layout::Decoy | Layout::DecoyOnly) {
             ram[..8].copy_from_slice(b"GALE0101");
             let decoy = ram_offset(MELEE_CONTROLLER_BASE) + CONTROLLER_STRUCT_SIZE as usize;
             ram[decoy + OFFSET_PLUGGED] = 0xFF;
             ram[decoy + OFFSET_STICK_X..decoy + OFFSET_STICK_X + 4]
                 .copy_from_slice(&f32::INFINITY.to_be_bytes());
+        }
+
+        if !layout.plants_controller_data() {
+            println!("mapping=0x{:x} mem1=0x{:x}", ptr as usize, ptr as usize + mem1);
+            std::io::stdout().flush().expect("flush helper address");
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            return;
         }
 
         // Dolphin copies the disc header to emulated 0x80000000 at boot, so MEM1
@@ -998,21 +1027,9 @@ garbage
             return;
         }
 
-        let mut child = Command::new(std::env::current_exe().expect("test binary path"))
-            .args(["--exact", HELPER_TEST, "--nocapture"])
-            .env(HELPER_ENV, "1")
-            .env(LAYOUT_ENV, layout.env_value())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("spawn helper");
+        let mut child = spawn_helper(layout);
         let mut helper_output = wait_for_helper(&mut child);
-
-        let process = DolphinProcess {
-            pid: child.id(),
-            name: "Slippi_Dolphin-x86_64.AppImage".to_string(),
-        };
-        let reader = DolphinReader::new(&process).expect("attach to the helper");
+        let reader = DolphinReader::new(&process_for(&child)).expect("attach to the helper");
         let report = reader.read_controller_state().expect("controller state");
 
         let port = &report.ports[2];
@@ -1024,10 +1041,57 @@ garbage
         assert!(!report.ports[1].connected, "empty port reads as disconnected");
         assert_eq!(report.auto_port, Some(2), "Slippi's local port");
 
-        // Closing the helper's stdin lets it exit; drain its output first, or
-        // the harness prints a broken-pipe error when it writes its summary.
+        finish_helper(&mut child, &mut helper_output);
+    }
+
+    /// A header with no controller data behind it is not MEM1 - Dolphin's heap
+    /// copy looks exactly like that - so the reader must refuse it rather than
+    /// show inputs read from the wrong place.
+    #[test]
+    fn refuses_a_header_with_no_controller_data_behind_it() {
+        if std::env::var_os(HELPER_ENV).is_some() {
+            return;
+        }
+
+        let mut child = spawn_helper(Layout::DecoyOnly);
+        let mut helper_output = wait_for_helper(&mut child);
+
+        let error = match DolphinReader::new(&process_for(&child)) {
+            Ok(_) => panic!("a bare disc header must not be accepted as MEM1"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("Could not find GameCube RAM"),
+            "unexpected error: {}",
+            error.message
+        );
+
+        finish_helper(&mut child, &mut helper_output);
+    }
+
+    fn spawn_helper(layout: Layout) -> Child {
+        Command::new(std::env::current_exe().expect("test binary path"))
+            .args(["--exact", HELPER_TEST, "--nocapture"])
+            .env(HELPER_ENV, "1")
+            .env(LAYOUT_ENV, layout.env_value())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn helper")
+    }
+
+    fn process_for(child: &Child) -> DolphinProcess {
+        DolphinProcess {
+            pid: child.id(),
+            name: "Slippi_Dolphin-x86_64.AppImage".to_string(),
+        }
+    }
+
+    /// Closing the helper's stdin lets it exit; drain its output first, or the
+    /// harness prints a broken-pipe error when it writes its summary.
+    fn finish_helper(child: &mut Child, output: &mut std::io::Lines<BufReader<std::process::ChildStdout>>) {
         drop(child.stdin.take());
-        for line in helper_output.by_ref() {
+        for line in output.by_ref() {
             if line.is_err() {
                 break;
             }
