@@ -187,6 +187,9 @@ its Dolphin on update, so re-run this after an update.
 
 ## Linux
 
+End-user setup (permissions, udev rules, Wayland caveats) is documented in
+[`docs/linux.md`](docs/linux.md); this section covers building and releasing.
+
 Runs on x86_64 (the CI target is `x86_64-unknown-linux-gnu`); the AppImage is the
 updatable artifact, since Tauri's updater has no deb/rpm path.
 
