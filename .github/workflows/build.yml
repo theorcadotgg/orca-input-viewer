@@ -7,6 +7,11 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+env:
+  # Kept near the tauri crate version in Cargo.lock: a newer CLI warns about
+  # bundle-type stamping, and a fixed value makes the CLI cache key below stable.
+  TAURI_CLI_VERSION: "2.9"
+
 jobs:
   build:
     strategy:
@@ -36,14 +41,33 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Restores ~/.cargo plus the crate's target dir (the crate sits in
+      # src-tauri, so the workspace has to be pointed at it). Keyed per target
+      # and on Cargo.lock, so a dependency bump rebuilds what changed only.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          key: ${{ matrix.target }}
+
+      - name: Cache Tauri CLI
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-${{ env.TAURI_CLI_VERSION }}
+
       - name: Install dependencies (Ubuntu)
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils libusb-1.0-0-dev libudev-dev
 
+      # Compiling the CLI from scratch costs several minutes a run; the binary
+      # is cached, so this only builds when the pinned version changes.
       - name: Install Tauri CLI
-        run: cargo install tauri-cli
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^${{ env.TAURI_CLI_VERSION }}" --locked
 
       # The Dolphin memory reader has a Linux-only integration test that reads a
       # child process's memory, so the tests have to run on the runner.

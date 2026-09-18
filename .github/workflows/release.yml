@@ -72,6 +72,12 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          key: x86_64-pc-windows-msvc
+
       - name: Exclude the workspace from Defender scanning
         shell: pwsh
         run: |
@@ -161,6 +167,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          key: aarch64-apple-darwin
 
       - name: Validate release signing secrets
         env:
@@ -281,6 +293,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          key: x86_64-unknown-linux-gnu
 
       - name: Configure Tauri Linux artifacts
         run: |
