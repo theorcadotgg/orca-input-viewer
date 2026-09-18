@@ -553,9 +553,8 @@ mod linux {
             // kernel gates /proc/<pid>/mem on the same permission check.
             let mem = File::open(format!("/proc/{}/mem", process.pid)).map_err(|e| {
                 format!(
-                    "Linux blocked access to Dolphin's memory (pid {}, {e}). Allow it with \
-                     `sudo sysctl -w kernel.yama.ptrace_scope=0`, or give the viewer \
-                     CAP_SYS_PTRACE instead - see RELEASING.md.",
+                    "Linux blocked access to Dolphin's memory (pid {}, {e}). Run \
+                     `sudo sysctl -w kernel.yama.ptrace_scope=0`, then Start Stream again.",
                     process.pid
                 )
             })?;
