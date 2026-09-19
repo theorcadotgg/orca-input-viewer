@@ -17,9 +17,20 @@ fn normalize_process_name(name: &str) -> String {
 }
 
 /// Dolphin and its forks (Dolphin, Slippi, Ishiiruka) on all platforms.
+///
+/// Linux has a second process called `dolphin`: KDE's file manager, which is
+/// installed on plenty of desktops that also run the emulator. Its executable is
+/// the bare name, while the emulator's is `dolphin-emu` (or a `Slippi_Dolphin`
+/// appimage, or `Dolphin` on macOS/Windows), so the bare name is excluded there.
 pub(crate) fn is_dolphin_process_name(name: &str) -> bool {
     let normalized = normalize_process_name(name);
-    normalized.starts_with("dolphin") || normalized.starts_with("slippidolphin")
+    if normalized.starts_with("slippidolphin") {
+        return true;
+    }
+    if normalized == "dolphin" {
+        return !cfg!(target_os = "linux");
+    }
+    normalized.starts_with("dolphin")
 }
 
 #[derive(Debug)]
@@ -78,6 +89,13 @@ pub fn find_dolphin_process() -> Option<DolphinProcess> {
         if is_dolphin_process_name(&name)
             || exe_name.as_deref().is_some_and(is_dolphin_process_name)
         {
+            // Dolphin renames its main thread, so the comm can read "CPU thread"
+            // while the executable is what identifies the emulator - and what the
+            // UI is better off showing.
+            let name = match exe_name {
+                Some(exe) if !is_dolphin_process_name(&name) => exe,
+                _ => name,
+            };
             return Some(DolphinProcess {
                 pid: pid.as_u32(),
                 name,
@@ -563,6 +581,7 @@ mod linux {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     use std::os::unix::fs::FileExt;
+    use std::time::Duration;
 
     /// A readable mapping from /proc/<pid>/maps.
     #[derive(Debug, Clone, Copy)]
@@ -696,55 +715,77 @@ mod linux {
         // MEM1 + VMEM + MEM2 merge into ~128MB; anything larger than this is a JIT
         // arena or something else this reader would never touch.
         const MAX_SCAN: usize = 512 * 1024 * 1024;
+        // A header with no live controller data behind it means the game is still
+        // loading (Dolphin has the disc ID in its heap before Melee writes its
+        // controller array), so give it time rather than failing the attempt.
+        const ATTEMPTS: u32 = 20;
+        const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-        let mut first_mapping: Option<usize> = None;
-        let mut first_header: Option<usize> = None;
+        for attempt in 0..ATTEMPTS {
+            let mut first_mapping: Option<usize> = None;
+            let mut first_header: Option<usize> = None;
 
-        for region in regions {
-            // Smaller than MEM1 itself cannot hold emulated RAM at offset 0.
-            if region.size() < MEM1_SIZE {
-                continue;
-            }
-            if region.size() == MEM1_MAPPING && first_mapping.is_none() {
-                first_mapping = Some(region.start);
-            }
-            if region.size() > MAX_SCAN {
-                continue;
-            }
-
-            // A header alone does not prove the base: Dolphin reads the same 0x20
-            // bytes to identify the disc and keeps them in its heap, which sits
-            // lower in the address space than MEM1 does. Only a candidate whose
-            // controller array reads like controller data is MEM1.
-            let mut from = 0;
-            while let Some(candidate) = find_disc_header(mem, region, from) {
-                first_header.get_or_insert(candidate);
-                if looks_like_controller_data(mem, candidate) {
-                    return Some(candidate);
+            for region in regions {
+                // Smaller than MEM1 itself cannot hold emulated RAM at offset 0.
+                if region.size() < MEM1_SIZE {
+                    continue;
                 }
-                from = candidate - region.start + PAGE_SIZE;
+                if region.size() == MEM1_MAPPING && first_mapping.is_none() {
+                    first_mapping = Some(region.start);
+                }
+                if region.size() > MAX_SCAN {
+                    continue;
+                }
+
+                // A header alone does not prove the base: Dolphin reads the same
+                // 0x20 bytes to identify the disc and keeps them in its heap, which
+                // sits lower in the address space than MEM1 does. Only a candidate
+                // whose controller array reads like controller data is MEM1.
+                let mut from = 0;
+                while let Some(candidate) = find_disc_header(mem, region, from) {
+                    first_header.get_or_insert(candidate);
+                    if looks_like_controller_data(mem, candidate) {
+                        eprintln!(
+                            "dolphin: MEM1 at {candidate:#x} ({:#x}..{:#x}, +{}MB into the mapping)",
+                            region.start,
+                            region.end,
+                            (candidate - region.start) / (1024 * 1024)
+                        );
+                        return Some(candidate);
+                    }
+                    from = candidate - region.start + PAGE_SIZE;
+                }
+            }
+
+            // No header anywhere: the game has not booted, and the 32MB mapping is
+            // the best guess - the same fallback the other platforms' readers use.
+            if first_header.is_none() {
+                return first_mapping;
+            }
+
+            // Headers exist but nothing validated yet, so wait and look again.
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(RETRY_DELAY);
             }
         }
 
-        // Nothing validated. With no header anywhere the game simply has not
-        // booted yet, and the 32MB mapping is the best guess - that is the case
-        // the other platforms' readers cover with the same fallback. With headers
-        // present but no controller data to match, there is no trustworthy base:
-        // returning one of them would show nonsense inputs, so report instead.
-        if first_header.is_none() {
-            first_mapping
-        } else {
-            None
-        }
+        // Headers present, controller data never appeared: report rather than
+        // return a mapping that would show nonsense inputs.
+        None
     }
 
     const PAGE_SIZE: usize = 4096;
 
-    /// Melee's controller array is 0x4C1FAC bytes into MEM1 and its structs hold
-    /// stick floats in [-1, 1] and a plugged byte of 0 or 1. Heap bytes that
-    /// happen to start with a disc header satisfy neither, which is what tells
-    /// the real MEM1 apart from them.
+    /// Melee's controller array is 0x4C1FAC bytes into MEM1, and a live game's
+    /// structs hold stick floats inside [-1, 1], a button word whose upper half is
+    /// unused, and something showing a port is connected. Heap bytes that happen
+    /// to start with a disc header satisfy none of that, and an all-zero window -
+    /// Dolphin's own heap copy of the header surrounded by zeroes - fails the last
+    /// check, which is what made an earlier version of this pick a different
+    /// mapping every attempt.
     fn looks_like_controller_data(mem: &File, base: usize) -> bool {
+        let mut any_port_alive = false;
+
         for port in 0..4u32 {
             let mut buf = [0u8; CONTROLLER_STRUCT_SIZE as usize];
             let emulated = MELEE_CONTROLLER_BASE + port * CONTROLLER_STRUCT_SIZE;
@@ -752,18 +793,31 @@ mod linux {
             if !mem.read_at(&mut buf, host as u64).is_ok_and(|n| n == buf.len()) {
                 return false;
             }
-            if buf[OFFSET_PLUGGED] > 1 {
-                return false;
-            }
+
             for offset in [OFFSET_STICK_X, OFFSET_STICK_Y, OFFSET_CSTICK_X, OFFSET_CSTICK_Y] {
                 let value = read_f32_be(&buf, offset);
-                if !value.is_finite() || value.abs() > 2.0 {
+                if !value.is_finite() || value.abs() > 1.5 {
                     return false;
                 }
             }
+
+            let buttons = u32::from_be_bytes([
+                buf[OFFSET_BUTTONS],
+                buf[OFFSET_BUTTONS + 1],
+                buf[OFFSET_BUTTONS + 2],
+                buf[OFFSET_BUTTONS + 3],
+            ]);
+            // Only the low 16 bits carry button state; the upper half stays clear.
+            if buttons & 0xFFFF_0000 != 0 {
+                return false;
+            }
+
+            if buttons != 0 || buf[OFFSET_PLUGGED] != 0 {
+                any_port_alive = true;
+            }
         }
 
-        true
+        any_port_alive
     }
 
     /// Scan a region on page boundaries for the next disc header at or after
@@ -953,15 +1007,11 @@ garbage
         let mem1 = layout.mem1_offset();
 
         // Dolphin reads the disc's first 0x20 bytes to identify it and keeps them
-        // in its heap; plant that same copy where it would sit - below MEM1 - with
-        // garbage where a controller array would be, so a reader that trusts the
-        // header alone picks it.
+        // in its heap; plant that same copy where it would sit - below MEM1 -
+        // surrounded by zeroes, which is what such a window looks like. Nothing
+        // there is alive, so a reader that trusts the header alone picks it.
         if matches!(layout, Layout::Decoy | Layout::DecoyOnly) {
             ram[..8].copy_from_slice(b"GALE0101");
-            let decoy = ram_offset(MELEE_CONTROLLER_BASE) + CONTROLLER_STRUCT_SIZE as usize;
-            ram[decoy + OFFSET_PLUGGED] = 0xFF;
-            ram[decoy + OFFSET_STICK_X..decoy + OFFSET_STICK_X + 4]
-                .copy_from_slice(&f32::INFINITY.to_be_bytes());
         }
 
         if !layout.plants_controller_data() {
@@ -1216,5 +1266,26 @@ mod tests {
 
         let replay = FakeRam::default().scene(0x0E, 0x01);
         assert_eq!(detect_slippi_local_port(&replay), None);
+    }
+
+    #[test]
+    fn recognises_emulators_but_not_linux_file_managers() {
+        for name in [
+            "Dolphin.exe",
+            "dolphin-emu",
+            "dolphin-emu-nogui",
+            "Slippi_Dolphin-x86_64.AppImage",
+            "Slippi Dolphin",
+        ] {
+            assert!(is_dolphin_process_name(name), "{name} should be an emulator");
+        }
+
+        // KDE's file manager is `dolphin`; on its own platform that name is the
+        // emulator, everywhere else it is something this reader must not attach to.
+        if cfg!(target_os = "linux") {
+            assert!(!is_dolphin_process_name("dolphin"));
+        } else {
+            assert!(is_dolphin_process_name("Dolphin"));
+        }
     }
 }
