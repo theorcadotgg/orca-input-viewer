@@ -94,11 +94,14 @@ pub fn find_dolphin_process() -> Option<DolphinProcess> {
 // Slippi online does not leave the local player on a fixed port, so guessing
 // (or defaulting to port 0) shows the opponent's inputs whenever the match
 // assigned the local player to another port. Slippi's own game-side code keeps
-// the answer in emulated RAM; the addresses below are Melee NTSC 1.02, matching
-// project-slippi/slippi-ssbm-asm (`Online/Online.s`, `Online/Core/InitOnlinePlay.asm`).
+// the answer in emulated RAM.
+//
+// The addresses and scene IDs below are values documented in
+// project-slippi/slippi-ssbm-asm (GPL-3.0): facts about Melee NTSC 1.02's memory
+// map. No code from that repository is copied or translated, and every read here
+// is this module's own.
 
-/// Scene ID. Slippi's `getMinorMajor` macro reads the u32 at 0x80479D30 and
-/// keeps the low 16 bits as `(minor << 8) | major`.
+/// Scene ID: the u32 at 0x80479D30, whose low 16 bits are `(minor << 8) | major`.
 const SCENE_MAJOR_ADDR: u32 = 0x8047_9D30;
 const SCENE_MINOR_ADDR: u32 = 0x8047_9D33;
 
@@ -109,14 +112,13 @@ const SCENE_ONLINE_IN_GAME: u8 = 0x02;
 // Minor 0x03 (results), 0x04 (splash) and 0x05 (game setup) carry no usable
 // local port, so those scenes leave the manual port selection alone.
 
-/// Merged into the scene table, this is `-0x5108(r13)` with r13 = 0x804DB6A0:
-/// the port the local player is using during the online menus, which Slippi
-/// reads to find the local player's cursor on the CSS.
+/// The port the local player is using during the online menus - the value
+/// Slippi reads to find the local player's cursor on the CSS.
 const ONLINE_MENU_LOCAL_PORT_ADDR: u32 = 0x804D_6598;
 
-/// `-0x49E4(r13)`: pointer to the online data buffer, allocated when an online
-/// match starts and preserved across rollback savestates. Its first two bytes
-/// are the ports the local player and the opponent were assigned.
+/// Pointer to the online data buffer, allocated when an online match starts and
+/// preserved across rollback savestates. Its first two bytes are the ports the
+/// local player and the opponent were assigned.
 const ONLINE_DATA_BUF_PTR_ADDR: u32 = 0x804D_6CBC;
 const ONLINE_DATA_BUF_LOCAL_PORT: u32 = 0x00;
 const ONLINE_DATA_BUF_OPPONENT_PORT: u32 = 0x01;
