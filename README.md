@@ -138,7 +138,7 @@ Two separate root-owned things have to be loosened:
 | Symptom | Likely cause |
 | --- | --- |
 | Stuck on "Waiting for Dolphin/Slippi to report inputs" | The emulator is not running yet — start Slippi. |
-| "Could not find GameCube RAM" | Dolphin is running with no game loaded — load Melee, then Start Stream again. |
+| "Could not find GameCube RAM" | Load Melee NTSC 1.02 and wait until it reaches the menu, then Start Stream again. The viewer only uses a verified RAM mapping. |
 | "Dolphin found but couldn't connect" | The memory permission is missing — see [Platform permissions](#platform-permissions). |
 | Adapter inputs never appear in Standalone mode | Adapter not seen: replug it, and on Linux install the udev rules. |
 | Overlay will not stay on top | Wayland has no always-on-top hint — use the OBS browser source instead. |

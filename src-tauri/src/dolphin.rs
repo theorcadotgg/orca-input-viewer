@@ -322,6 +322,13 @@ fn read_state<M: EmuRam>(ram: &M) -> InputReport {
     }
 }
 
+/// Melee NTSC 1.02's first six disc-header bytes are the game ID. Bytes 6
+/// and 7 are binary disc number and revision, not ASCII digits.
+#[cfg(any(target_os = "linux", test))]
+fn is_melee_disc_header(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GALE01\x00\x02")
+}
+
 #[cfg(target_os = "windows")]
 mod windows {
     use super::*;
@@ -518,7 +525,7 @@ mod macos {
 
     /// Every GameCube disc header is copied to emulated 0x80000000 at boot, so the
     /// start of the RAM mapping always reads back as the 8-character disc ID
-    /// ("GALE01" + maker code for Melee). macOS maps several unrelated 32MB
+    /// ("GALE01" plus binary disc/revision bytes for Melee). macOS maps several unrelated 32MB
     /// regions, so the header - not the size alone - identifies the real mapping.
     unsafe fn has_disc_header(task: task_t, base: mach_vm_address_t) -> bool {
         let mut id = [0u8; 8];
@@ -584,10 +591,12 @@ mod linux {
     use std::time::Duration;
 
     /// A readable mapping from /proc/<pid>/maps.
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     pub(super) struct Region {
         pub(super) start: usize,
         pub(super) end: usize,
+        pub(super) offset: u64,
+        pub(super) path: String,
     }
 
     impl Region {
@@ -619,8 +628,7 @@ mod linux {
                 }
             })?;
 
-            let regions = read_maps(process.pid)?;
-            match find_gc_ram_base(&mem, &regions) {
+            match find_gc_ram_base(&mem, process.pid)? {
                 Some(base) => Ok(DolphinReader { mem, gc_ram_base: base }),
                 None => Err(ConnectError::other(
                     "Could not find GameCube RAM in Dolphin memory. \
@@ -630,6 +638,14 @@ mod linux {
         }
 
         pub fn read_controller_state(&self) -> Result<InputReport, String> {
+            // Dolphin can stop or replace its RAM while the viewer keeps the
+            // /proc/pid/mem handle open. Do not keep streaming stale addresses.
+            let mut header = [0u8; 8];
+            if !self.read_memory(self.gc_ram_base, &mut header)
+                || !is_melee_disc_header(&header)
+            {
+                return Err("Melee RAM is no longer available; restart the stream after loading Melee".to_string());
+            }
             Ok(read_state(self))
         }
 
@@ -667,7 +683,9 @@ mod linux {
         let mut regions = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             let mut fields = line.split_whitespace();
-            let (Some(range), Some(perms)) = (fields.next(), fields.next()) else {
+            let (Some(range), Some(perms), Some(offset)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
                 continue;
             };
             if !perms.starts_with('r') {
@@ -676,102 +694,118 @@ mod linux {
             let Some((start, end)) = range.split_once('-') else {
                 continue;
             };
-            if let (Ok(start), Ok(end)) = (
+            // Skip device and inode. The remaining field is the mapped object;
+            // a deleted POSIX shared memory object still keeps its name here.
+            let (Some(_device), Some(_inode)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            if let (Ok(start), Ok(end), Ok(offset)) = (
                 usize::from_str_radix(start, 16),
                 usize::from_str_radix(end, 16),
+                u64::from_str_radix(offset, 16),
             ) {
-                regions.push(Region { start, end });
+                if end > start {
+                    regions.push(Region {
+                        start,
+                        end,
+                        offset,
+                        path: fields.collect::<Vec<_>>().join(" "),
+                    });
+                }
             }
         }
 
         regions
     }
 
-    /// Melee leaves its disc header at emulated 0x80000000 at boot, so the bytes
-    /// there read back as the disc ID ("GALE01" plus the maker code). The game
-    /// code prefix keeps the scan from matching arbitrary runs of printable bytes
-    /// in Dolphin's heap; the controller addresses this reader uses are Melee's,
-    /// so requiring Melee's ID costs nothing.
-    fn is_melee_disc_header(bytes: &[u8]) -> bool {
-        bytes.len() >= 8
-            && bytes[..3] == *b"GAL"
-            && bytes[..8]
+    /// Both current Dolphin and Slippi's older Ishiiruka fork map MEM1 from
+    /// offset zero of a POSIX shared-memory object. Linux exposes that object's
+    /// name and mapping offset in /proc/<pid>/maps, regardless of distro or VMA
+    /// placement. Other views of the same object have nonzero offsets.
+    pub(super) fn is_dolphin_ram_mapping(region: &Region) -> bool {
+        let Some(name) = region.path.strip_prefix("/dev/shm/") else {
+            return false;
+        };
+        region.offset == 0
+            && region.size() >= 24 * 1024 * 1024
+            && ["dolphin-emu.", "dolphinmem."]
                 .iter()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'Z'))
+                .any(|prefix| name.strip_prefix(prefix).is_some_and(|suffix| {
+                    let number = suffix
+                        .strip_suffix(" (deleted)")
+                        .unwrap_or(suffix);
+                    !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
+                }))
     }
 
     /// Find MEM1's host mapping.
     ///
-    /// Dolphin maps MEM1, its fake VMEM and MEM2 as separate anonymous mappings on
-    /// 64-bit Linux, but the kernel merges adjacent mappings with identical
-    /// permissions into one region - so unlike macOS's VM regions or Windows's
-    /// MEM_MAPPED blocks, MEM1 is not reliably at a region start, it can sit at
-    /// any page offset inside a bigger one. Look for the disc header instead.
-    /// Before a game is loaded nothing carries a header, so fall back to the
-    /// mapping sizes the other platforms assume.
-    fn find_gc_ram_base(mem: &File, regions: &[Region]) -> Option<usize> {
+    /// Prefer Dolphin's own shared-memory mapping at file offset zero. Older
+    /// forks and unusual layouts may not expose that name, so search their
+    /// readable maps for a validated Melee header as a compatibility path.
+    /// Never select a mapping by size alone: unrelated 32MB mappings are common.
+    fn find_gc_ram_base(mem: &File, pid: u32) -> Result<Option<usize>, ConnectError> {
         const MEM1_SIZE: usize = 24 * 1024 * 1024;
-        const MEM1_MAPPING: usize = 32 * 1024 * 1024; // MEM1 (24MB) plus the 8MB tail
-        // MEM1 + VMEM + MEM2 merge into ~128MB; anything larger than this is a JIT
-        // arena or something else this reader would never touch.
+        // Limit only the anonymous compatibility scan. Named Dolphin RAM is
+        // checked directly, even when a VMA is unexpectedly large.
         const MAX_SCAN: usize = 512 * 1024 * 1024;
         // A header with no live controller data behind it means the game is still
         // loading (Dolphin has the disc ID in its heap before Melee writes its
         // controller array), so give it time rather than failing the attempt.
-        const ATTEMPTS: u32 = 20;
-        const RETRY_DELAY: Duration = Duration::from_millis(500);
+        const ATTEMPTS: u32 = if cfg!(test) { 2 } else { 20 };
+        const RETRY_DELAY: Duration = Duration::from_millis(if cfg!(test) { 20 } else { 500 });
 
         for attempt in 0..ATTEMPTS {
-            let mut first_mapping: Option<usize> = None;
-            let mut first_header: Option<usize> = None;
+            // Dolphin can start its memory system after we opened /proc/pid/mem.
+            // Re-read maps while waiting so newly created RAM is discoverable.
+            let regions = read_maps(pid)?;
+            let named: Vec<&Region> = regions.iter().filter(|r| is_dolphin_ram_mapping(r)).collect();
+            for region in &named {
+                let mut header = [0u8; 8];
+                if mem.read_at(&mut header, region.start as u64).is_ok_and(|n| n == header.len())
+                    && is_melee_disc_header(&header)
+                    && looks_like_controller_data(mem, region.start)
+                {
+                    return Ok(Some(region.start));
+                }
+            }
 
-            for region in regions {
-                // Smaller than MEM1 itself cannot hold emulated RAM at offset 0.
-                if region.size() < MEM1_SIZE {
-                    continue;
-                }
-                if region.size() == MEM1_MAPPING && first_mapping.is_none() {
-                    first_mapping = Some(region.start);
-                }
-                if region.size() > MAX_SCAN {
-                    continue;
-                }
-
-                // A header alone does not prove the base: Dolphin reads the same
-                // 0x20 bytes to identify the disc and keeps them in its heap, which
-                // sits lower in the address space than MEM1 does. Only a candidate
-                // whose controller array reads like controller data is MEM1.
-                let mut from = 0;
-                while let Some(candidate) = find_disc_header(mem, region, from) {
-                    first_header.get_or_insert(candidate);
-                    if looks_like_controller_data(mem, candidate) {
-                        eprintln!(
-                            "dolphin: MEM1 at {candidate:#x} ({:#x}..{:#x}, +{}MB into the mapping)",
-                            region.start,
-                            region.end,
-                            (candidate - region.start) / (1024 * 1024)
-                        );
-                        return Some(candidate);
+            // A known RAM object is authoritative. A copied disc header in the
+            // heap must never override it while the game is still loading.
+            if named.is_empty() {
+                for region in &regions {
+                    // Smaller than MEM1 itself cannot hold emulated RAM at offset 0.
+                    if region.size() < MEM1_SIZE || region.size() > MAX_SCAN {
+                        continue;
                     }
-                    from = candidate - region.start + PAGE_SIZE;
+
+                    // A header alone does not prove the base: Dolphin reads the
+                    // same bytes into its heap. Only a candidate whose controller
+                    // array reads like controller data is MEM1.
+                    let mut from = 0;
+                    while let Some(candidate) = find_disc_header(mem, region, from) {
+                        if looks_like_controller_data(mem, candidate) {
+                            eprintln!(
+                                "dolphin: MEM1 at {candidate:#x} ({:#x}..{:#x}, +{}MB into the mapping)",
+                                region.start,
+                                region.end,
+                                (candidate - region.start) / (1024 * 1024)
+                            );
+                            return Ok(Some(candidate));
+                        }
+                        from = candidate - region.start + PAGE_SIZE;
+                    }
                 }
             }
 
-            // No header anywhere: the game has not booted, and the 32MB mapping is
-            // the best guess - the same fallback the other platforms' readers use.
-            if first_header.is_none() {
-                return first_mapping;
-            }
-
-            // Headers exist but nothing validated yet, so wait and look again.
+            // The game or its controller state may not be initialized yet.
             if attempt + 1 < ATTEMPTS {
                 std::thread::sleep(RETRY_DELAY);
             }
         }
 
-        // Headers present, controller data never appeared: report rather than
-        // return a mapping that would show nonsense inputs.
-        None
+        // No mapping was validated; report instead of showing nonsense inputs.
+        Ok(None)
     }
 
     const PAGE_SIZE: usize = 4096;
@@ -892,7 +926,7 @@ pub use unsupported::DolphinReader;
 /// mock.
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
-    use super::linux::{parse_maps, DolphinReader};
+    use super::linux::{is_dolphin_ram_mapping, parse_maps, DolphinReader};
     use super::*;
     use std::io::{BufRead, BufReader, Cursor, Write};
     use std::process::{Child, Command, Stdio};
@@ -918,6 +952,10 @@ mod linux_tests {
         /// The same decoy with no readable MEM1 behind it, which is what a game
         /// that has not booted looks like once Dolphin's heap holds the header.
         DecoyOnly,
+        /// An unrelated 32MB mapping before any game has booted.
+        Empty,
+        /// Dolphin's named POSIX shared-memory object at file offset zero.
+        Named,
     }
 
     impl Layout {
@@ -926,6 +964,8 @@ mod linux_tests {
                 Ok("merged") => Layout::Merged,
                 Ok("decoy") => Layout::Decoy,
                 Ok("decoy-only") => Layout::DecoyOnly,
+                Ok("empty") => Layout::Empty,
+                Ok("named") => Layout::Named,
                 _ => Layout::Separate,
             }
         }
@@ -936,12 +976,14 @@ mod linux_tests {
                 Layout::Merged => "merged",
                 Layout::Decoy => "decoy",
                 Layout::DecoyOnly => "decoy-only",
+                Layout::Empty => "empty",
+                Layout::Named => "named",
             }
         }
 
         fn region_size(self) -> usize {
             match self {
-                Layout::Separate => 32 * 1024 * 1024,
+                Layout::Separate | Layout::Empty | Layout::Named => 32 * 1024 * 1024,
                 Layout::Merged | Layout::Decoy => 96 * 1024 * 1024,
                 Layout::DecoyOnly => 32 * 1024 * 1024,
             }
@@ -949,15 +991,14 @@ mod linux_tests {
 
         fn mem1_offset(self) -> usize {
             match self {
-                Layout::Separate | Layout::DecoyOnly => 0,
+                Layout::Separate | Layout::DecoyOnly | Layout::Empty | Layout::Named => 0,
                 Layout::Merged | Layout::Decoy => 32 * 1024 * 1024,
             }
         }
 
-        /// DecoyOnly plants the header copy and nothing else, so everything a
-        /// reader could find belongs to the decoy.
+        /// The header-only and empty layouts have no live controller data.
         fn plants_controller_data(self) -> bool {
-            self != Layout::DecoyOnly
+            !matches!(self, Layout::DecoyOnly | Layout::Empty)
         }
     }
 
@@ -983,6 +1024,23 @@ garbage
     }
 
     #[test]
+    fn identifies_only_offset_zero_dolphin_shared_memory() {
+        let maps = "\
+7f3c00000000-7f3c02000000 rw-s 00000000 00:01 71 /dev/shm/dolphin-emu.1234 (deleted)
+7f3c02000000-7f3c04000000 rw-s 02000000 00:01 71 /dev/shm/dolphin-emu.1234 (deleted)
+7f3c04000000-7f3c06000000 rw-s 00000000 00:01 72 /dev/shm/dolphinmem.0 (deleted)
+7f3c06000000-7f3c08000000 rw-p 00000000 00:00 0
+7f3c08000000-7f3c0a000000 rw-s 00000000 00:01 73 /dev/shm/other.1234 (deleted)
+";
+        let regions = parse_maps(Cursor::new(maps));
+        assert_eq!(regions.len(), 5);
+        assert_eq!(
+            regions.iter().map(is_dolphin_ram_mapping).collect::<Vec<_>>(),
+            [true, false, true, false, false]
+        );
+    }
+
+    #[test]
     fn plants_emulated_ram_for_the_parent() {
         if std::env::var_os(HELPER_ENV).is_none() {
             return; // Regular run: the parent's test does the asserting.
@@ -990,16 +1048,40 @@ garbage
 
         let layout = Layout::from_env();
         let size = layout.region_size();
+        let shared_fd = if layout == Layout::Named {
+            let name = std::ffi::CString::new(format!("/dolphin-emu.{}", std::process::id()))
+                .expect("shared memory name");
+            let fd = unsafe {
+                libc::shm_open(
+                    name.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                    0o600,
+                )
+            };
+            assert!(fd >= 0, "helper could not create Dolphin shared memory");
+            assert_eq!(unsafe { libc::shm_unlink(name.as_ptr()) }, 0);
+            assert_eq!(unsafe { libc::ftruncate(fd, size as libc::off_t) }, 0);
+            Some(fd)
+        } else {
+            None
+        };
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
+                if shared_fd.is_some() {
+                    libc::MAP_SHARED
+                } else {
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS
+                },
+                shared_fd.unwrap_or(-1),
                 0,
             )
         };
+        if let Some(fd) = shared_fd {
+            assert_eq!(unsafe { libc::close(fd) }, 0);
+        }
         assert_ne!(ptr, libc::MAP_FAILED, "helper could not map emulated RAM");
         let ram = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, size) };
 
@@ -1011,7 +1093,7 @@ garbage
         // surrounded by zeroes, which is what such a window looks like. Nothing
         // there is alive, so a reader that trusts the header alone picks it.
         if matches!(layout, Layout::Decoy | Layout::DecoyOnly) {
-            ram[..8].copy_from_slice(b"GALE0101");
+            ram[..8].copy_from_slice(b"GALE01\x00\x02");
         }
 
         if !layout.plants_controller_data() {
@@ -1024,7 +1106,7 @@ garbage
 
         // Dolphin copies the disc header to emulated 0x80000000 at boot, so MEM1
         // starts with the disc ID.
-        ram[mem1..mem1 + 8].copy_from_slice(b"GALE0101");
+        ram[mem1..mem1 + 8].copy_from_slice(b"GALE01\x00\x02");
 
         // Melee's controller array, with a controller in port 3.
         const PORT: usize = 2;
@@ -1056,6 +1138,11 @@ garbage
     #[test]
     fn reads_controller_state_out_of_a_live_process() {
         reads_planted_state(Layout::Separate);
+    }
+
+    #[test]
+    fn reads_controller_state_from_named_dolphin_shared_memory() {
+        reads_planted_state(Layout::Named);
     }
 
     /// The layout a user hit: Linux merges Dolphin's adjacent anonymous mappings,
@@ -1121,6 +1208,22 @@ garbage
         finish_helper(&mut child, &mut helper_output);
     }
 
+    #[test]
+    fn refuses_an_unrelated_32mb_mapping_without_a_game() {
+        if std::env::var_os(HELPER_ENV).is_some() {
+            return;
+        }
+
+        let mut child = spawn_helper(Layout::Empty);
+        let mut helper_output = wait_for_helper(&mut child);
+        let error = match DolphinReader::new(&process_for(&child)) {
+            Ok(_) => panic!("an arbitrary 32MB mapping must not be accepted as MEM1"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("Could not find GameCube RAM"));
+        finish_helper(&mut child, &mut helper_output);
+    }
+
     fn spawn_helper(layout: Layout) -> Child {
         Command::new(std::env::current_exe().expect("test binary path"))
             .args(["--exact", HELPER_TEST, "--nocapture"])
@@ -1175,6 +1278,13 @@ garbage
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn accepts_the_binary_melee_102_disc_header() {
+        assert!(is_melee_disc_header(b"GALE01\x00\x02"));
+        assert!(!is_melee_disc_header(b"GALE0102"));
+        assert!(!is_melee_disc_header(b"GALE01\x00\x01"));
+    }
 
     /// Sparse stand-in for emulated RAM. Unmapped bytes fail to read, the same
     /// way a real read of an unmapped address does.

@@ -76,7 +76,7 @@ overlay window behaves as it does on Windows and macOS.
 | The app will not launch | FUSE 2 missing — install `libfuse2`/`fuse2`, or run it with `--appimage-extract-and-run` |
 | "Linux blocked access to Dolphin's memory" | Approve the password prompt; if none appears, run the `sysctl` command above |
 | Stuck on "Waiting for Dolphin/Slippi" | The emulator is not running yet — start Slippi |
-| "Could not find GameCube RAM" | Dolphin is running but no game is loaded — load Melee, then Start Stream again |
+| "Could not find GameCube RAM" | Load Melee NTSC 1.02 and wait until it reaches the menu, then Start Stream again. The viewer now requires a verified RAM mapping before showing inputs. |
 | Adapter inputs do not show in Standalone mode | Apply the udev rules, then replug the adapter |
 | Overlay window will not stay on top | Wayland — use the OBS browser source instead |
 | Overlay is black or garbled with an NVIDIA card | Handled automatically in current builds; older builds need `WEBKIT_DISABLE_DMABUF_RENDERER=1` |
